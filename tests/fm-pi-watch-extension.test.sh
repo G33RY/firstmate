@@ -1735,8 +1735,9 @@ printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replacement-fixture\n' "$$"
 while :; do
   if [ -e "$FM_TRIGGER_FILE" ]; then
+    outcome=$(cat "$FM_TRIGGER_FILE")
     rm -f "$FM_TRIGGER_FILE"
-    printf 'signal: replacement-race actionable outcome\n'
+    printf 'signal: %s\n' "$outcome"
     exit 0
   fi
   [ ! -e "$FM_STOP_FILE" ] || exit 0
@@ -1821,12 +1822,14 @@ if (!initial.details?.ok || !String(initial.details.message).includes("started P
 }
 await waitFor(() => liveArms().length === 1, "initial live arm");
 
-writeFileSync(process.env.FM_TRIGGER_FILE, "trigger\n");
+writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-race actionable outcome\n");
 await waitFor(() => oldDeliveryStarted, "old-session actionable delivery");
 if (!previous.prompts[0]?.includes("signal: replacement-race actionable outcome")) {
   throw new Error(`old session did not begin the actionable delivery: ${previous.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
+writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
+await waitFor(() => liveArms().length === 0, "mid-delivery successor actionable close");
 
 await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 await waitFor(() => liveArms().length === 0, "retired old-session successor");
@@ -1840,11 +1843,14 @@ await replacement.handlers.get("session_start")?.({
   previousSessionFile: "/tmp/previous.jsonl",
 }, {});
 await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome")),
-  "replacement-session actionable delivery",
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome")) &&
+    replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
+  "replacement-session actionable deliveries",
 );
-if (replacement.prompts.filter((message) => message.includes("signal: replacement-race actionable outcome")).length !== 1) {
-  throw new Error(`replacement session did not receive exactly one carried outcome: ${replacement.prompts.join(" | ")}`);
+for (const outcome of ["replacement-race actionable outcome", "replacement-successor actionable outcome"]) {
+  if (replacement.prompts.filter((message) => message.includes(`signal: ${outcome}`)).length !== 1) {
+    throw new Error(`replacement session did not receive exactly one carried ${outcome}: ${replacement.prompts.join(" | ")}`);
+  }
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
 const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});

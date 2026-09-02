@@ -6,7 +6,7 @@
 // session activation. Only the active live generation may start, stop, rearm, or
 // clear the arm child. An owning replacement session_start (or fresh factory bind)
 // arms its new generation without a model turn. A replacement also carries an
-// actionable close that was still being delivered through the private
+// actionable closes that were still pending delivery through the private
 // state/extensions/pi-primary-watch/session-replacement-actionable.json handoff.
 // Terminal quit leaves the final generation stopped so late callbacks cannot rearm.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
@@ -49,6 +49,11 @@ type PendingActionableClose = {
   predecessorArmPid: string;
 };
 
+type ReplacementActionableHandoff = {
+  version: 2;
+  pending: PendingActionableClose[];
+};
+
 type WatchToolShellState = {
   shell?: Box;
   call?: Component;
@@ -68,7 +73,7 @@ type SessionGeneration = {
   retryFailures: number;
   restoring: boolean;
   seq: number;
-  pendingActionable: PendingActionableClose | null;
+  pendingActionables: PendingActionableClose[];
 };
 
 function refreshWatchToolShell(
@@ -119,10 +124,11 @@ const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 let nextGenerationId = 0;
 let nextHandoffId = 0;
 let activeGeneration: SessionGeneration | null = null;
-let replacementHandoff: PendingActionableClose | null = null;
+let replacementHandoff: PendingActionableClose[] | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -204,22 +210,29 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
   return value as PendingActionableClose;
 }
 
-function persistReplacementHandoff(pending: PendingActionableClose): void {
-  try {
-    const stored = validatePendingActionable(JSON.parse(readFileSync(actionableHandoff, "utf8")));
-    if (stored.token === pending.token) {
-      replacementHandoff = pending;
-      return;
-    }
-    throw new Error(`conflicting Pi replacement actionable handoff at ${actionableHandoff}`);
-  } catch (error) {
-    if (nodeErrorCode(error) !== "ENOENT") throw error;
+function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
+  if (
+    typeof value !== "object" || value === null ||
+    (value as { version?: unknown }).version !== 2 ||
+    !Array.isArray((value as { pending?: unknown }).pending) ||
+    (value as { pending: unknown[] }).pending.length === 0
+  ) {
+    throw new Error(`invalid Pi replacement actionable handoff at ${actionableHandoff}`);
   }
-  replacementHandoff = pending;
+  const pending = (value as { pending: unknown[] }).pending.map(validatePendingActionable);
+  if (new Set(pending.map((item) => item.token)).size !== pending.length) {
+    throw new Error(`invalid Pi replacement actionable handoff at ${actionableHandoff}`);
+  }
+  return pending;
+}
+
+function writeReplacementHandoff(pending: PendingActionableClose[]): void {
+  replacementHandoff = [...pending];
   mkdirSync(handoffDir, { recursive: true });
   const temporary = `${actionableHandoff}.tmp-${process.pid}-${++nextHandoffId}`;
+  const handoff: ReplacementActionableHandoff = { version: 2, pending };
   try {
-    writeFileSync(temporary, `${JSON.stringify(pending)}\n`, { mode: 0o600 });
+    writeFileSync(temporary, `${JSON.stringify(handoff)}\n`, { mode: 0o600 });
     renameSync(temporary, actionableHandoff);
   } catch (error) {
     try {
@@ -231,23 +244,34 @@ function persistReplacementHandoff(pending: PendingActionableClose): void {
   }
 }
 
-function loadReplacementHandoff(): PendingActionableClose | null {
-  if (replacementHandoff) return replacementHandoff;
+function persistReplacementHandoff(pending: PendingActionableClose[]): void {
+  if (pending.length === 0) return;
+  writeReplacementHandoff(pending);
+}
+
+function loadReplacementHandoff(): PendingActionableClose[] {
+  if (replacementHandoff) return [...replacementHandoff];
   try {
-    const pending = validatePendingActionable(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
     replacementHandoff = pending;
-    return pending;
+    return [...pending];
   } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return null;
+    if (nodeErrorCode(error) === "ENOENT") return [];
     throw error;
   }
 }
 
 function clearReplacementHandoff(pending: PendingActionableClose): void {
-  if (replacementHandoff?.token === pending.token) replacementHandoff = null;
   try {
-    const stored = validatePendingActionable(JSON.parse(readFileSync(actionableHandoff, "utf8")));
-    if (stored.token === pending.token) unlinkSync(actionableHandoff);
+    const stored = replacementHandoff ?? validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    const remaining = stored.filter((item) => item.token !== pending.token);
+    if (remaining.length === stored.length) return;
+    if (remaining.length > 0) {
+      writeReplacementHandoff(remaining);
+    } else {
+      replacementHandoff = null;
+      unlinkSync(actionableHandoff);
+    }
   } catch (error) {
     if (nodeErrorCode(error) !== "ENOENT") throw error;
   }
@@ -293,7 +317,7 @@ function createGeneration(): SessionGeneration {
     retryFailures: 0,
     restoring: false,
     seq: 0,
-    pendingActionable: null,
+    pendingActionables: [],
   };
 }
 
@@ -329,15 +353,16 @@ async function waitForGenerationChildClose(armChild: ChildProcess | null): Promi
 }
 
 async function stopSessionGeneration(generation: SessionGeneration, replacement: boolean): Promise<void> {
-  let persistedToken = "";
-  if (replacement && generation.pendingActionable) {
-    persistReplacementHandoff(generation.pendingActionable);
-    persistedToken = generation.pendingActionable.token;
+  let persistedTokens = "";
+  if (replacement && generation.pendingActionables.length > 0) {
+    persistReplacementHandoff(generation.pendingActionables);
+    persistedTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
   }
   const child = stopGeneration(generation);
   await waitForGenerationChildClose(child);
-  if (replacement && generation.pendingActionable && generation.pendingActionable.token !== persistedToken) {
-    persistReplacementHandoff(generation.pendingActionable);
+  const currentTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
+  if (replacement && currentTokens && currentTokens !== persistedTokens) {
+    persistReplacementHandoff(generation.pendingActionables);
   }
 }
 
@@ -467,9 +492,40 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  function enqueuePendingActionable(
+    owner: SessionGeneration,
+    pending: PendingActionableClose,
+  ): void {
+    if (!owner.pendingActionables.some((item) => item.token === pending.token)) {
+      owner.pendingActionables.push(pending);
+    }
+  }
+
   function finishPendingActionable(owner: SessionGeneration, pending: PendingActionableClose): void {
-    if (owner.pendingActionable?.token === pending.token) owner.pendingActionable = null;
+    const index = owner.pendingActionables.findIndex((item) => item.token === pending.token);
+    if (index >= 0) owner.pendingActionables.splice(index, 1);
     clearReplacementHandoff(pending);
+  }
+
+  async function processPendingActionables(owner: SessionGeneration): Promise<void> {
+    if (!generationIsLive(owner) || owner.restoring || owner.pendingActionables.length === 0) return;
+    owner.restoring = true;
+    try {
+      while (generationIsLive(owner) && owner.pendingActionables.length > 0) {
+        const pending = owner.pendingActionables[0];
+        const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
+        if (!generationIsLive(owner)) return;
+        const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
+        await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+        if (!generationIsLive(owner)) return;
+        finishPendingActionable(owner, pending);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
+    } finally {
+      if (generationIsLive(owner)) owner.restoring = false;
+    }
   }
 
   function retryDelay(attempt: number): number {
@@ -631,8 +687,10 @@ export default function (pi: ExtensionAPI) {
         settleReadiness(true);
       }
       const reason = actionableLine(combined);
-      if (reason && !owner.pendingActionable) {
-        owner.pendingActionable = createPendingActionable(reason, String(armChild.pid ?? ""));
+      if (reason && !armPendingActionable.has(armChild)) {
+        const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
+        armPendingActionable.set(armChild, pending);
+        enqueuePendingActionable(owner, pending);
       }
     };
     const releaseChild = (): void => {
@@ -655,25 +713,11 @@ export default function (pi: ExtensionAPI) {
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
-        const pending = owner.pendingActionable ?? createPendingActionable(classification.message, predecessor);
-        owner.pendingActionable = pending;
-        if (!generationIsLive(owner) || owner.restoring) return;
+        const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
+        enqueuePendingActionable(owner, pending);
+        if (!generationIsLive(owner)) return;
         owner.retryFailures = 0;
-        owner.restoring = true;
-        void (async () => {
-          try {
-            const restoration = await restoreAfterActionableClose(owner, predecessor);
-            if (!generationIsLive(owner)) return;
-            const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-            if (generationIsLive(owner)) finishPendingActionable(owner, pending);
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
-          } finally {
-            if (generationIsLive(owner)) owner.restoring = false;
-          }
-        })();
+        void processPendingActionables(owner);
         return;
       }
       if (!generationIsLive(owner) || owner.restoring) return;
@@ -695,33 +739,12 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function restoreReplacementActionable(
-    owner: SessionGeneration,
-    pending: PendingActionableClose,
-  ): Promise<void> {
-    if (!generationIsLive(owner) || owner.restoring) return;
-    owner.pendingActionable = pending;
-    owner.restoring = true;
-    try {
-      const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
-      if (!generationIsLive(owner)) return;
-      const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-      await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-      if (generationIsLive(owner)) finishPendingActionable(owner, pending);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore a replacement-session actionable wake\n${detail}`);
-    } finally {
-      if (generationIsLive(owner)) owner.restoring = false;
-    }
-  }
-
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
     if (lockOwnership() !== "owned") return;
-    let pending: PendingActionableClose | null = null;
+    let pending: PendingActionableClose[] = [];
     try {
       pending = loadReplacementHandoff();
     } catch (error) {
@@ -730,8 +753,9 @@ export default function (pi: ExtensionAPI) {
       surfaceFailure(generation, `watcher: FAILED - Pi extension could not load a replacement-session actionable wake\n${detail}\n${result.message}`);
       return;
     }
-    if (pending) {
-      await restoreReplacementActionable(generation, pending);
+    if (pending.length > 0) {
+      for (const actionable of pending) enqueuePendingActionable(generation, actionable);
+      await processPendingActionables(generation);
       return;
     }
     startArm(generation);
