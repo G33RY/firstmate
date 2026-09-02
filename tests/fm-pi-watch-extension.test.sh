@@ -1609,10 +1609,6 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const startup = makePi();
 mod.default(startup.pi);
 await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
-const first = await startup.getTool().execute("startup", {}, undefined, undefined, {});
-if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
-  throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
-}
 await waitFor(() => {
   const arm = currentArm();
   return arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid);
@@ -1634,13 +1630,6 @@ async function replaceSession(previous, reason) {
     reason,
     previousSessionFile: `/tmp/previous-${reason}.jsonl`,
   }, {});
-  const armed = await next.getTool().execute(`arm-${reason}`, {}, undefined, undefined, {});
-  if (!armed.details?.ok) {
-    throw new Error(`${reason} replacement arm failed: ${JSON.stringify(armed.details)}`);
-  }
-  if (String(armed.details.message).includes("shutting down")) {
-    throw new Error(`${reason} replacement still refused with shutting-down latch`);
-  }
   await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== previousArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
@@ -1649,26 +1638,31 @@ async function replaceSession(previous, reason) {
   if (live.length !== 1) {
     throw new Error(`${reason} expected exactly one live arm child, got ${live.join(",") || "(none)"}`);
   }
+  const redundant = await next.getTool().execute(`redundant-${reason}`, {}, undefined, undefined, {});
+  if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+    throw new Error(`${reason} replacement lost automatic arm ownership: ${JSON.stringify(redundant.details)}`);
+  }
   return next;
 }
 
 let current = await replaceSession(startup, "new");
 current = await replaceSession(current, "resume");
 current = await replaceSession(current, "fork");
+current = await replaceSession(current, "reload");
 
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
 const sameInstanceArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-const sameInstanceResult = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
-if (!sameInstanceResult.details?.ok || String(sameInstanceResult.details.message).includes("shutting down")) {
-  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceResult.details)}`);
-  }
-  await waitFor(() => {
+await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== sameInstanceArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
-  }, "same-instance replacement child and arm record");
-  await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+}, "same-instance replacement child and arm record");
+await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+const sameInstanceResult = await current.getTool().execute("same-instance-redundant", {}, undefined, undefined, {});
+if (!sameInstanceResult.details?.ok || !String(sameInstanceResult.details.message).includes("unchanged")) {
+  throw new Error(`same-instance replacement lost automatic arm ownership: ${JSON.stringify(sameInstanceResult.details)}`);
+}
 if (liveArmPids().length !== 1) {
   throw new Error(`same-instance expected one live arm child, got ${liveArmPids().join(",")}`);
 }
@@ -1711,9 +1705,166 @@ if (liveArmPids().length !== 0) {
 EOF
 )
   status=$?
-  [ "$status" -eq 0 ] || fail "Pi session transitions must rearm through an explicit generation owner (exit $status): $out"
+  [ "$status" -eq 0 ] || fail "Pi session transitions must auto-arm through their generation owner (exit $status): $out"
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
-  pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
+  pass "Pi session transitions auto-arm through a generation owner across /new /resume /fork/reload, stale callbacks, and quit"
+}
+
+test_pi_session_replacement_carries_inflight_actionable_close() {
+  local repo home plugin log marker_root trigger stop out status
+  repo="$TMP_ROOT/pi-session-replacement-handoff-root"
+  home="$TMP_ROOT/pi-session-replacement-handoff-home"
+  log="$TMP_ROOT/pi-session-replacement-handoff.log"
+  marker_root="$TMP_ROOT/pi-session-replacement-handoff-markers"
+  trigger="$TMP_ROOT/pi-session-replacement-handoff.trigger"
+  stop="$TMP_ROOT/pi-session-replacement-handoff.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replacement-fixture\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: replacement-race actionable outcome\n'
+    exit 0
+  fi
+  [ ! -e "$FM_STOP_FILE" ] || exit 0
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_MARKER_ROOT="$marker_root" FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseOldDelivery = () => {};
+const oldDeliveryRelease = new Promise((resolve) => {
+  releaseOldDelivery = resolve;
+});
+let oldDeliveryStarted = false;
+
+function makePi(blockDelivery = false) {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+      if (blockDelivery) {
+        oldDeliveryStarted = true;
+        await oldDeliveryRelease;
+      }
+    },
+    events: { on() {} },
+  };
+  return { pi, handlers, getTool: () => tool, prompts };
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function armRows() {
+  if (!existsSync(process.env.FM_ARM_LOG)) return [];
+  return readFileSync(process.env.FM_ARM_LOG, "utf8")
+    .trim()
+    .split(/\n/)
+    .filter((row) => row.startsWith("arm "))
+    .map((row) => {
+      const match = /pid=(\d+) marker=(\S+)/.exec(row);
+      return match ? { pid: match[1], marker: match[2] } : { pid: "", marker: "" };
+    });
+}
+
+function liveArms() {
+  return armRows().filter((arm) => arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid));
+}
+
+async function waitFor(pred, label, attempts = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const previous = makePi(true);
+mod.default(previous.pi);
+const initial = await previous.getTool().execute("initial-arm", {}, undefined, undefined, {});
+if (!initial.details?.ok || !String(initial.details.message).includes("started Pi extension arm child")) {
+  throw new Error(`initial arm failed: ${JSON.stringify(initial.details)}`);
+}
+await waitFor(() => liveArms().length === 1, "initial live arm");
+
+writeFileSync(process.env.FM_TRIGGER_FILE, "trigger\n");
+await waitFor(() => oldDeliveryStarted, "old-session actionable delivery");
+if (!previous.prompts[0]?.includes("signal: replacement-race actionable outcome")) {
+  throw new Error(`old session did not begin the actionable delivery: ${previous.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
+
+await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await waitFor(() => liveArms().length === 0, "retired old-session successor");
+
+const replacement = makePi(false);
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=durable-handoff`);
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({
+  type: "session_start",
+  reason: "new",
+  previousSessionFile: "/tmp/previous.jsonl",
+}, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome")),
+  "replacement-session actionable delivery",
+);
+if (replacement.prompts.filter((message) => message.includes("signal: replacement-race actionable outcome")).length !== 1) {
+  throw new Error(`replacement session did not receive exactly one carried outcome: ${replacement.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
+const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
+if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+  throw new Error(`replacement did not retain automatic arm ownership: ${JSON.stringify(redundant.details)}`);
+}
+
+releaseOldDelivery();
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (liveArms().length !== 1) {
+  throw new Error(`old delivery completion disturbed replacement ownership: ${JSON.stringify(liveArms())}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close"
+  [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
+  pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
 
 test_pi_process_exit_cleanup_listener_lifecycle() {
@@ -2824,6 +2975,7 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
+test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
