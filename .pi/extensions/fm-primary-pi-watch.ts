@@ -142,15 +142,20 @@ type ReplacementCoordinator = {
   deliveries: Map<string, ActionableDeliveryClaim>;
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
-  __firstmatePiWatchReplacement?: ReplacementCoordinator;
+  __firstmatePiWatchReplacements?: Map<string, ReplacementCoordinator>;
 };
 const replacementCoordinatorGlobal = globalThis as ReplacementCoordinatorGlobal;
-const replacementCoordinator = replacementCoordinatorGlobal.__firstmatePiWatchReplacement ??= {
-  receiver: null,
-  pending: [],
-  nextTokenId: 0,
-  deliveries: new Map(),
-};
+const replacementCoordinators = replacementCoordinatorGlobal.__firstmatePiWatchReplacements ??= new Map();
+let replacementCoordinator = replacementCoordinators.get(actionableHandoff);
+if (!replacementCoordinator) {
+  replacementCoordinator = {
+    receiver: null,
+    pending: [],
+    nextTokenId: 0,
+    deliveries: new Map(),
+  };
+  replacementCoordinators.set(actionableHandoff, replacementCoordinator);
+}
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();

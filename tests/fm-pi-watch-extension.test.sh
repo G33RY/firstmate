@@ -2077,7 +2077,21 @@ if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(ar
 await waitFor(() => existsSync(process.env.FM_ARM_COUNT) && readFileSync(process.env.FM_ARM_COUNT, "utf8").trim() === "1", "original arm");
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block late handoff publication\n");
+const foreignState = `${process.env.FM_HOME}/foreign-state`;
+const { mkdirSync } = await import("node:fs");
+mkdirSync(foreignState, { recursive: true });
+writeFileSync(`${foreignState}/.lock`, `${process.pid}\n`);
+process.env.FM_STATE_OVERRIDE = foreignState;
+const foreignMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=foreign-state`);
+const foreign = makePi();
+foreignMod.default(foreign.pi);
+await foreign.handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, {});
 await new Promise((resolve) => setTimeout(resolve, 250));
+if (foreign.prompts.some((message) => message.includes("signal: late retiring actionable outcome"))) {
+  throw new Error(`late old-state outcome crossed into foreign state: ${foreign.prompts.join(" | ")}`);
+}
+await foreign.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+delete process.env.FM_STATE_OVERRIDE;
 
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=late-retiring-close`);
 const replacement = makePi();
