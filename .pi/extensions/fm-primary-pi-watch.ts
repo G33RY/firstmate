@@ -47,6 +47,7 @@ type PendingActionableClose = {
   token: string;
   message: string;
   predecessorArmPid: string;
+  delivered?: true;
 };
 
 type ReplacementActionableHandoff = {
@@ -71,6 +72,7 @@ type SessionGeneration = {
   replacement: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  cleanupTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
   seq: number;
@@ -225,7 +227,9 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
     typeof (value as { message?: unknown }).message !== "string" ||
     !actionableLine((value as { message: string }).message) ||
     typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
-    !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid)
+    !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
+    ((value as { delivered?: unknown }).delivered !== undefined &&
+      (value as { delivered?: unknown }).delivered !== true)
   ) {
     throw new Error(`invalid Pi replacement actionable handoff at ${actionableHandoff}`);
   }
@@ -350,6 +354,7 @@ function createGeneration(): SessionGeneration {
     replacement: false,
     child: null,
     retryTimer: null,
+    cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
     seq: 0,
@@ -368,7 +373,9 @@ function generationIsLive(generation: SessionGeneration): boolean {
 function stopGeneration(generation: SessionGeneration): ChildProcess | null {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
+  if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
   generation.retryTimer = null;
+  generation.cleanupTimer = null;
   const child = generation.child;
   if (child) child.kill("SIGTERM");
   generation.child = null;
@@ -509,8 +516,8 @@ export default function (pi: ExtensionAPI) {
     message: string,
     repairFailed: boolean,
     recovery?: { generation: string; watcherPid: string },
-  ): Promise<void> {
-    if (!generationIsLive(owner)) return;
+  ): Promise<boolean> {
+    if (!generationIsLive(owner)) return false;
     if (recovery) {
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
       if (!confirmed.ok) {
@@ -519,17 +526,18 @@ export default function (pi: ExtensionAPI) {
           await retireArm(owner.child);
         }
         await sendWake(owner, `${message}\n\n${confirmed.detail}`);
-        return;
+        return generationIsLive(owner);
       }
     }
     if (!repairFailed) {
       const branchDelivery = offerWakeToBranch(message);
       if (branchDelivery) {
         await branchDelivery;
-        return;
+        return true;
       }
     }
     await sendWake(owner, message);
+    return generationIsLive(owner);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -564,23 +572,48 @@ export default function (pi: ExtensionAPI) {
   }
 
   function finishPendingActionable(owner: SessionGeneration, pending: PendingActionableClose): void {
+    clearReplacementHandoff(pending);
     const index = owner.pendingActionables.findIndex((item) => item.token === pending.token);
     if (index >= 0) owner.pendingActionables.splice(index, 1);
-    clearReplacementHandoff(pending);
+  }
+
+  function surfaceCleanupFailure(owner: SessionGeneration, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    surfaceFailure(owner, `watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake\n${detail}`);
+  }
+
+  function schedulePendingCleanup(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || owner.cleanupTimer) return;
+    const timer = setTimeout(() => {
+      if (owner.cleanupTimer === timer) owner.cleanupTimer = null;
+      void processPendingActionables(owner);
+    }, retryDelay(1));
+    timer.unref();
+    owner.cleanupTimer = timer;
   }
 
   async function processPendingActionables(owner: SessionGeneration): Promise<void> {
     if (!generationIsLive(owner) || owner.restoring || owner.pendingActionables.length === 0) return;
     owner.restoring = true;
+    const attemptedCleanup = new Set<string>();
     try {
       while (generationIsLive(owner) && owner.pendingActionables.length > 0) {
-        const pending = owner.pendingActionables[0];
+        for (const delivered of owner.pendingActionables.filter((item) => item.delivered && !attemptedCleanup.has(item.token))) {
+          attemptedCleanup.add(delivered.token);
+          try {
+            finishPendingActionable(owner, delivered);
+          } catch (error) {
+            surfaceCleanupFailure(owner, error);
+          }
+        }
+        const pending = owner.pendingActionables.find((item) => !item.delivered);
+        if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
         if (existingClaim && existingClaim.owner !== owner) {
           const settlement = await existingClaim.settlement;
           if (!generationIsLive(owner)) return;
           if (settlement === "delivered") {
-            finishPendingActionable(owner, pending);
+            pending.delivered = true;
             continue;
           }
           if (replacementCoordinator.deliveries.get(pending.token) === existingClaim) {
@@ -606,14 +639,19 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-          if (!generationIsLive(owner)) {
+          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+          if (!delivered) {
             settleClaim("failed");
             releaseClaim();
             return;
           }
+          pending.delivered = true;
           settleClaim("delivered");
-          finishPendingActionable(owner, pending);
+          try {
+            finishPendingActionable(owner, pending);
+          } catch (error) {
+            surfaceCleanupFailure(owner, error);
+          }
           releaseClaim();
         } catch (error) {
           settleClaim("failed");
@@ -625,7 +663,10 @@ export default function (pi: ExtensionAPI) {
       const detail = error instanceof Error ? error.message : String(error);
       surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
     } finally {
-      if (generationIsLive(owner)) owner.restoring = false;
+      if (generationIsLive(owner)) {
+        owner.restoring = false;
+        if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
+      }
     }
   }
 
@@ -867,6 +908,7 @@ export default function (pi: ExtensionAPI) {
     if (generation.pendingActionables.length > 0) {
       if (loadFailure) surfaceFailure(generation, loadFailure);
       await processPendingActionables(generation);
+      if (generationIsLive(generation) && !generation.child && !generation.retryTimer) startArm(generation);
       return;
     }
     const result = startArm(generation);

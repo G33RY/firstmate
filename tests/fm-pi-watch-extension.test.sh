@@ -1856,17 +1856,24 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
   throw new Error(`replacement raced the accepted old-session delivery: ${replacement.prompts.join(" | ")}`);
 }
+writeFileSync(
+  `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`,
+  "{malformed handoff\n",
+);
 releaseOldDelivery();
 await replacementStart;
 await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome")) &&
-    replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
-  "replacement-session actionable deliveries",
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
+  "replacement-session successor actionable delivery",
 );
-for (const outcome of ["replacement-race actionable outcome", "replacement-successor actionable outcome"]) {
-  if (replacement.prompts.filter((message) => message.includes(`signal: ${outcome}`)).length !== 1) {
-    throw new Error(`replacement session did not receive exactly one carried ${outcome}: ${replacement.prompts.join(" | ")}`);
-  }
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`settled old-session branch delivery was replayed: ${replacement.prompts.join(" | ")}`);
+}
+if (replacement.prompts.filter((message) => message.includes("signal: replacement-successor actionable outcome")).length !== 1) {
+  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${replacement.prompts.join(" | ")}`);
+}
+if (!replacement.prompts.some((message) => message.includes("could not clear a delivered replacement-session actionable wake"))) {
+  throw new Error(`handoff cleanup failure was not surfaced: ${replacement.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
 const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
