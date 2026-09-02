@@ -591,20 +591,33 @@ export default function (pi: ExtensionAPI) {
         const settlement = new Promise<"delivered" | "failed">((resolveSettlement) => {
           settleClaim = resolveSettlement;
         });
-        replacementCoordinator.deliveries.set(pending.token, { owner, settlement });
+        const deliveryClaim = { owner, settlement };
+        replacementCoordinator.deliveries.set(pending.token, deliveryClaim);
+        const releaseClaim = (): void => {
+          if (replacementCoordinator.deliveries.get(pending.token) === deliveryClaim) {
+            replacementCoordinator.deliveries.delete(pending.token);
+          }
+        };
         try {
           const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
             settleClaim("failed");
+            releaseClaim();
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
           await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+          if (!generationIsLive(owner)) {
+            settleClaim("failed");
+            releaseClaim();
+            return;
+          }
           settleClaim("delivered");
           finishPendingActionable(owner, pending);
-          if (!generationIsLive(owner)) return;
+          releaseClaim();
         } catch (error) {
           settleClaim("failed");
+          releaseClaim();
           throw error;
         }
       }

@@ -1859,14 +1859,14 @@ if (replacement.prompts.some((message) => message.includes("signal: replacement-
 releaseOldDelivery();
 await replacementStart;
 await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
-  "replacement-session successor actionable delivery",
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome")) &&
+    replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
+  "replacement-session actionable deliveries",
 );
-if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
-  throw new Error(`settled old-session delivery was duplicated: ${replacement.prompts.join(" | ")}`);
-}
-if (replacement.prompts.filter((message) => message.includes("signal: replacement-successor actionable outcome")).length !== 1) {
-  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${replacement.prompts.join(" | ")}`);
+for (const outcome of ["replacement-race actionable outcome", "replacement-successor actionable outcome"]) {
+  if (replacement.prompts.filter((message) => message.includes(`signal: ${outcome}`)).length !== 1) {
+    throw new Error(`replacement session did not receive exactly one carried ${outcome}: ${replacement.prompts.join(" | ")}`);
+  }
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
 const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
