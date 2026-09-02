@@ -2216,6 +2216,7 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 let tool = null;
 let deliveryStarted = false;
+const prompts = [];
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -2224,9 +2225,9 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {
+  sendUserMessage: async (message) => {
     deliveryStarted = true;
-    await new Promise(() => {});
+    prompts.push(message);
   },
   events: { on() {}, emit() {} },
 };
@@ -2254,6 +2255,20 @@ try {
 }
 if (!shutdownError) throw new Error("replacement shutdown hid the handoff persistence failure");
 await waitFor(() => !existsSync(process.env.FM_CHILD_MARKER), "successor cleanup after persistence failure");
+const { unlinkSync } = await import("node:fs");
+unlinkSync(`${process.env.FM_HOME}/state/extensions`);
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=persistence-failure`);
+replacementMod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(() => prompts.length >= 2, "in-process handoff after persistence failure");
+if (!prompts[1].includes("signal: persistence failure actionable outcome")) {
+  throw new Error(`replacement lost the in-process actionable outcome: ${prompts.join(" | ")}`);
+}
+if (!prompts[1].includes("could not persist a replacement-session actionable wake")) {
+  throw new Error(`replacement did not surface the persistence failure: ${prompts[1]}`);
+}
+handlers.get("before_agent_start")?.({ prompt: prompts[1] }, {});
+process.exit(0);
 EOF
 )
   status=$?

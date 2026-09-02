@@ -407,6 +407,16 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
       persistReplacementHandoff(generation.pendingActionables);
       persistedTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
     }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    for (const pending of generation.pendingActionables) {
+      if (replacementCoordinator.pending.some((item) => item.token === pending.token)) continue;
+      replacementCoordinator.pending.push({
+        ...pending,
+        message: `${pending.message}\n\nwatcher: FAILED - Pi extension could not persist a replacement-session actionable wake\n${detail}`,
+      });
+    }
+    throw error;
   } finally {
     const child = stopGeneration(generation);
     await waitForGenerationChildClose(child);
