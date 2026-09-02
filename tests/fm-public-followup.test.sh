@@ -2873,6 +2873,40 @@ test_remote_collection_refuses_unreadable_outbox() {
   pass "an unreadable remote outbox fails collection without losing its result"
 }
 
+test_invalid_registration_fails_remote_collection() {
+  local home remote out command registry
+  remote_fixture_prepare
+  home=$(make_home remote-invalid-registration)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-invalid-registration req-invalid-registration secondmate:mini-default work-invalid
+
+  out=$(run_pf "$home" brief pf-invalid-registration) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  command=${command//<value>/data/work-invalid/report.md}
+  command=${command//<one bounded public-safe sentence>/The remote lane finished before registration damage.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the remote route must stage its terminal result"
+
+  registry="$home/state/public-followup/registry/pf-invalid-registration"
+  grep -v '^work_home=' "$registry" > "$registry.tmp"
+  mv "$registry.tmp" "$registry"
+  chmod 600 "$registry"
+
+  expect_failure "consume must refuse an invalid route-bearing registration" \
+    run_pf_remote "$home" consume
+  assert_contains "$EXPECT_OUT" "unreached pf-invalid-registration" \
+    "consume must name the obligation with invalid registration state"
+  assert_contains "$EXPECT_OUT" "work home route unknown" \
+    "consume must identify the unresolved route field"
+  assert_contains "$EXPECT_OUT" "stays retained for reconciliation" \
+    "consume must report the remote result as retained"
+  [ -n "$(ls -A "$remote/state/public-followup/outbox" 2>/dev/null)" ] \
+    || fail "invalid registration state must not remove the staged result"
+  [ "$(delivery_state "$home" pf-invalid-registration)" = pending-work ] \
+    || fail "invalid registration state must leave the promise open"
+  pass "invalid registration fails collection without dropping the staged result"
+}
+
 test_remote_route_loss_fails_brief_and_collection() {
   local home remote out command
   remote_fixture_prepare
@@ -3068,6 +3102,7 @@ test_remote_unconfirmed_clear_is_unknown_completion
 test_remote_work_home_emit_reaches_owning_home
 test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
+test_invalid_registration_fails_remote_collection
 test_remote_route_loss_fails_brief_and_collection
 test_remote_route_reassignment_fails_collection_loudly
 test_remote_brief_rejects_traversal_route_paths

@@ -510,6 +510,13 @@ collect_remote_staged_events() {
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     id=$(basename "$file")
     fm_pf_slug_valid "$id" || continue
+    if ! public_followup_registration_valid "$id"; then
+      work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+      printf 'unreached %s: registration cannot resolve its work home route %s, so its terminal result stays retained for reconciliation\n' \
+        "$id" "${work_home:-unknown}"
+      rc=1
+      continue
+    fi
     work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
     case "$work_home" in secondmate:*) sid=${work_home#secondmate:} ;; *) continue ;; esac
     work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
