@@ -510,17 +510,18 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
-  # Prepare every section before committing any receipt. Commit before writing
-  # the prepared presentation so a later fold/manifest failure cannot leave a
-  # displayed one-shot backstop unacknowledged and repeat it on the next drain.
+  # Prepare every section before presentation, but do not commit its receipt
+  # until the prepared bytes reach stdout. If the consumer closes or fails,
+  # leave the receipt behind so the next drain can recover the presentation.
+  if ! command cat "$prepared"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
   if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
     rm -f -- "$prepared"
     return 1
   fi
-  command cat "$prepared"
-  local rc=$?
   rm -f -- "$prepared"
-  return "$rc"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]

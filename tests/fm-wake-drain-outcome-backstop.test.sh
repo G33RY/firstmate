@@ -214,7 +214,38 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation() {
   pass "backstop receipts prevent repeats without consuming delayed signal annotations"
 }
 
-test_receipt_commit_failure_does_not_present_an_unacknowledged_backstop() {
+test_output_failure_does_not_commit_the_backstop_receipt() {
+  local dir state fakebin out retry_out real_cat
+  dir=$(make_case output-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/failed.out"
+  retry_out="$dir/retry.out"
+  real_cat=$(command -v cat)
+  mkdir -p "$fakebin"
+
+  printf 'done: retry after the output consumer fails\n' > "$state/output-task.status"
+  cat > "$fakebin/cat" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  "$state"/.status-presentation.prepared.*) exit 1 ;;
+esac
+exec "$real_cat" "\$@"
+SH
+  chmod +x "$fakebin/cat"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the top-level empty-queue drain changed its compatibility exit on an output failure"
+  [ ! -s "$out" ] || fail "the failed output consumer received unexpected bytes: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry_out" \
+    || fail "backstop retry failed after the output consumer recovered"
+  grep -F 'output-task done: retry after the output consumer fails' "$retry_out" >/dev/null \
+    || fail "the output failure consumed the backstop receipt: $(cat "$retry_out")"
+  pass "a failed output consumer leaves the backstop unacknowledged for retry"
+}
+
+test_receipt_commit_failure_repeats_the_already_presented_backstop() {
   local dir state fakebin out retry_out final_out real_mv
   dir=$(make_case receipt-commit-failure)
   state="$dir/state"
@@ -225,7 +256,7 @@ test_receipt_commit_failure_does_not_present_an_unacknowledged_backstop() {
   real_mv=$(command -v mv)
   mkdir -p "$fakebin"
 
-  printf 'done: must not print before its receipt is durable\n' > "$state/atomic-task.status"
+  printf 'done: presentation precedes its durable receipt\n' > "$state/atomic-task.status"
   cat > "$fakebin/mv" <<SH
 #!/usr/bin/env bash
 for arg in "\$@"; do last=\$arg; done
@@ -236,18 +267,18 @@ SH
 
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "the top-level empty-queue drain changed its compatibility exit on a receipt failure"
-  [ ! -s "$out" ] \
-    || fail "the backstop printed before its receipt commit succeeded: $(cat "$out")"
+  grep -F 'atomic-task done: presentation precedes its durable receipt' "$out" >/dev/null \
+    || fail "receipt failure prevented the prepared backstop presentation: $(cat "$out")"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry_out" \
     || fail "backstop retry failed after receipt storage recovered"
-  grep -F 'atomic-task done: must not print before its receipt is durable' "$retry_out" >/dev/null \
+  grep -F 'atomic-task done: presentation precedes its durable receipt' "$retry_out" >/dev/null \
     || fail "the uncommitted backstop did not retry after storage recovered: $(cat "$retry_out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$final_out" \
     || fail "post-recovery idempotence drain failed"
   [ ! -s "$final_out" ] \
     || fail "the successfully committed retry repeated: $(cat "$final_out")"
-  pass "a backstop is presented only after its one-shot receipt commits"
+  pass "receipt failure may repeat a presented backstop but cannot lose it"
 }
 
 test_rejected_decision_line_surfaces_once_through_backstop() {
@@ -348,7 +379,8 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop
 test_same_second_outcome_uses_status_causal_position
 test_drain_does_not_scan_append_only_outcome_history
 test_successful_backstop_is_idempotent_without_consuming_delayed_annotation
-test_receipt_commit_failure_does_not_present_an_unacknowledged_backstop
+test_output_failure_does_not_commit_the_backstop_receipt
+test_receipt_commit_failure_repeats_the_already_presented_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
 test_outcome_index_recovery_is_fail_closed_and_migratable
 test_overbound_routine_event_stays_silent
