@@ -33,10 +33,11 @@
 // for the whole process; and a secondary read-only Pi session that never owns
 // the lock must never write markers, clean leases, or accept wakes.
 //
-// Failure direction: every path that cannot reach a working branch falls back
-// to delivering the wake to MAIN exactly as before the branch existed - a
-// broken branch degrades to today's behavior, never to a lost wake. The wake
-// queue itself stays durable until the handler runs the drain's
+// Failure direction: every accepted path that cannot reach a working branch
+// rejects its settlement to the watcher, which retains delivery ownership and
+// routes the wake to MAIN through its consumption-acknowledged path. A broken
+// branch declines later offers, so they take that same watcher path directly.
+// The wake queue itself stays durable until the handler runs the drain's
 // acknowledgement, so a branch that dies mid-handling re-presents its rows at
 // the next drain exactly as a mid-handling main crash always has.
 //
@@ -153,10 +154,10 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
-// One provider failure falls back immediately but leaves room for a transient
-// outage to recover on the next wake. A second consecutive provider failure
-// latches the branch off. While latched, main keeps every wake except one
-// branch recovery probe after each exponentially backed-off cooldown.
+// One provider failure rejects immediately to watcher-owned fallback but leaves
+// room for a transient outage to recover on the next wake. A second consecutive
+// provider failure latches the branch off. While latched, main keeps every wake
+// except one branch recovery probe after each exponentially backed-off cooldown.
 const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
