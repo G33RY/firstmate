@@ -1873,6 +1873,87 @@ EOF
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
 
+test_pi_replacement_persistence_failure_stops_arm_child() {
+  local repo home plugin count marker out status
+  repo="$TMP_ROOT/pi-replacement-persistence-failure-root"
+  home="$TMP_ROOT/pi-replacement-persistence-failure-home"
+  count="$TMP_ROOT/pi-replacement-persistence-failure.count"
+  marker="$TMP_ROOT/pi-replacement-persistence-failure.marker"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s\n' "$$"
+  printf 'signal: persistence failure actionable outcome\n'
+  exit 0
+fi
+cleanup() { rm -f "$FM_CHILD_MARKER"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf '%s\n' "$$" > "$FM_CHILD_MARKER"
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_CHILD_MARKER="$marker" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+let deliveryStarted = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    deliveryStarted = true;
+    await new Promise(() => {});
+  },
+  events: { on() {}, emit() {} },
+};
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const armed = await tool.execute("initial-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
+await waitFor(() => deliveryStarted && existsSync(process.env.FM_CHILD_MARKER), "blocked delivery and successor child");
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block handoff directory\n");
+let shutdownError = null;
+try {
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+} catch (error) {
+  shutdownError = error;
+}
+if (!shutdownError) throw new Error("replacement shutdown hid the handoff persistence failure");
+await waitFor(() => !existsSync(process.env.FM_CHILD_MARKER), "successor cleanup after persistence failure");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement shutdown must stop its arm after handoff persistence fails"
+  [ -z "$out" ] || fail "Pi replacement persistence-failure cleanup test printed output: $out"
+  pass "Pi replacement persistence failure still stops its arm child"
+}
+
 test_pi_process_exit_cleanup_listener_lifecycle() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-exit-listener-root"
@@ -2982,6 +3063,7 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
+test_pi_replacement_persistence_failure_stops_arm_child
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm

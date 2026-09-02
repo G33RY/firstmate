@@ -354,12 +354,15 @@ async function waitForGenerationChildClose(armChild: ChildProcess | null): Promi
 
 async function stopSessionGeneration(generation: SessionGeneration, replacement: boolean): Promise<void> {
   let persistedTokens = "";
-  if (replacement && generation.pendingActionables.length > 0) {
-    persistReplacementHandoff(generation.pendingActionables);
-    persistedTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
+  try {
+    if (replacement && generation.pendingActionables.length > 0) {
+      persistReplacementHandoff(generation.pendingActionables);
+      persistedTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
+    }
+  } finally {
+    const child = stopGeneration(generation);
+    await waitForGenerationChildClose(child);
   }
-  const child = stopGeneration(generation);
-  await waitForGenerationChildClose(child);
   const currentTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
   if (replacement && currentTokens && currentTokens !== persistedTokens) {
     persistReplacementHandoff(generation.pendingActionables);
