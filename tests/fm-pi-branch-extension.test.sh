@@ -1849,7 +1849,14 @@ const duringProbe = makeOffer("signal: main owns wakes during a branch probe");
 pi.events.emit("fm-branch-supervision:dispatch", duringProbe);
 if (duringProbe.accepted) throw new Error("a second wake entered the branch while its one cooldown probe was in flight");
 releaseFailedProbe();
-await settle(() => mainUserMessages.length === 4, "failed cooldown probe fallback");
+const failedProbeError = await failedProbe.settlement.then(() => null, (error) => error);
+if (!(failedProbeError instanceof Error) || !failedProbeError.message.includes("provider failed after construction")) {
+  throw new Error(`failed cooldown probe did not reject settlement: ${String(failedProbeError)}`);
+}
+if (mainUserMessages.length !== 0) throw new Error("failed cooldown probe bypassed watcher-owned fallback delivery");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("failed cooldown probe left the claimed row grant active");
+}
 
 // The failed probe doubles the cooldown from five to ten minutes. Five more
 // minutes are not enough, but the next five admit exactly one recovery probe.
@@ -1861,7 +1868,7 @@ now += 5 * 60 * 1000;
 const recoveryProbe = dispatch("signal: recovery probe after extended cooldown");
 if (!recoveryProbe.accepted) throw new Error("the branch did not re-probe after the extended cooldown elapsed");
 await settle(() => attempt === 6 && sentToMain.some((sent) => sent.message.content.includes("cooldown probe recovered the branch")), "successful recovery probe");
-if (mainUserMessages.length !== 4) throw new Error("a successful recovery probe also fell back to main");
+if (mainUserMessages.length !== 0) throw new Error("a successful recovery probe also fell back to main");
 const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"));
 if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
   throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
@@ -1872,7 +1879,14 @@ if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n"
 // reaches the branch and can report successfully.
 const afterRecoveryError = dispatch("signal: first provider error after recovery");
 if (!afterRecoveryError.accepted) throw new Error("the successful probe did not clear the branch latch");
-await settle(() => mainUserMessages.length === 5, "first post-recovery provider fallback");
+const afterRecoveryFailure = await afterRecoveryError.settlement.then(() => null, (error) => error);
+if (!(afterRecoveryFailure instanceof Error) || !afterRecoveryFailure.message.includes("provider failed after construction")) {
+  throw new Error(`first post-recovery provider error did not reject settlement: ${String(afterRecoveryFailure)}`);
+}
+if (mainUserMessages.length !== 0) throw new Error("post-recovery provider error bypassed watcher-owned fallback delivery");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("post-recovery provider error left the claimed row grant active");
+}
 const afterRecoveryHealthy = dispatch("signal: healthy turn after one post-recovery error");
 if (!afterRecoveryHealthy.accepted) throw new Error("the successful probe did not clear the provider-error streak");
 await settle(() => attempt === 8 && sentToMain.some((sent) => sent.message.content.includes("post-recovery report proved")), "post-recovery healthy report");
