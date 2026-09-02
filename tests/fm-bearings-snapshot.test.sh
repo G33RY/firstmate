@@ -185,16 +185,19 @@ EOF
 }
 
 refresh_local_secondmate_ledgers() {  # <parent-home>
-  local parent=$1 registry line mate
+  local parent=$1 registry line mate refresh_path=$PATH
   registry="$parent/data/secondmates.md"
   [ -f "$registry" ] && [ -r "$registry" ] || return 0
+  # Once this fixture's fake backend exists, ledger production must use it too;
+  # otherwise child state depends on whether the CI host has a live tmux server.
+  [ ! -x "$parent/fakebin/tmux" ] || refresh_path="$parent/fakebin:$refresh_path"
   while IFS= read -r line || [ -n "$line" ]; do
     secondmate_registry_parse_line "$line" || continue
     [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
     mate=$SECONDMATE_REGISTRY_HOME
     [ -f "$mate/.fm-secondmate-home" ] && [ -f "$mate/AGENTS.md" ] \
       && [ -d "$mate/bin" ] && [ -d "$mate/data" ] && [ -d "$mate/state" ] || continue
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    PATH="$refresh_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
       FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
       "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null 2>&1 || true
   done < "$registry"
