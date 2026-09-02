@@ -2453,7 +2453,7 @@ test_remote_secondmate_loop_delivers_and_retires() {
 }
 
 test_delivered_remote_registration_skips_offline_route() {
-  local home remote log out
+  local home remote log out registry
   remote_fixture_prepare
   home=$(make_home remote-delivered-skip)
   remote=$(make_remote_route "$home" mini-default)
@@ -2470,8 +2470,12 @@ test_delivered_remote_registration_skips_offline_route() {
   run_pf_remote "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$log" run_pf_remote "$home" deliver pf-remote-delivered >/dev/null \
     || fail "delivery failed"
-  assert_grep 'state=delivered' "$home/state/public-followup/registry/pf-remote-delivered" \
+  registry="$home/state/public-followup/registry/pf-remote-delivered"
+  assert_grep 'state=delivered' "$registry" \
     "delivery must retain a delivered registration"
+  grep -v '^relation_id=' "$registry" > "$registry.tmp"
+  mv "$registry.tmp" "$registry"
+  chmod 600 "$registry"
 
   out=$(FM_FAKE_SSH_MODE=unreachable run_pf_remote "$home" consume) \
     || fail "a delivered registration must not require its remote route: $out"

@@ -513,6 +513,8 @@ collect_remote_staged_events() {
       rc=1
       continue
     fi
+    loop_state=$(fm_pf_registry_loop_state "$STATE" "$id")
+    [ "$loop_state" = open ] || continue
     if ! public_followup_registration_valid "$id"; then
       work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
       printf 'unreached %s: registration cannot resolve its work home route %s, so its terminal result stays retained for reconciliation\n' \
@@ -520,8 +522,6 @@ collect_remote_staged_events() {
       rc=1
       continue
     fi
-    loop_state=$(fm_pf_registry_loop_state "$STATE" "$id")
-    [ "$loop_state" = open ] || continue
     work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
     case "$work_home" in secondmate:*) sid=${work_home#secondmate:} ;; *) continue ;; esac
     work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
