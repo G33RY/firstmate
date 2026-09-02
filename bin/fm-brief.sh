@@ -425,10 +425,15 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   This includes a validation pipeline you started: it is your own active work, not an
+   external dependency, so keep polling its status within the same turn until it reaches
+   a gate or a terminal outcome, then act - never end a turn or arm a background monitor
+   merely because it is still running.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   a scheduled window); a running pipeline step is not one. Firstmate then leaves your idle pane
+   alone and rechecks it on a long cadence instead of treating it as a possible wedge.
+   Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.

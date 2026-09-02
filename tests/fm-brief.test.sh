@@ -212,9 +212,29 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "keep polling its status within the same turn until it reaches" "$brief" \
+      "$id: brief missing the in-turn pipeline-polling requirement"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+# The no-mistakes Definition of done must require in-turn pipeline polling,
+# not a turn ended on a background monitor.
+test_no_mistakes_dod_requires_in_turn_polling() {
+  local home id brief
+  home="$TMP_ROOT/dod-polling-home"
+  write_registry "$home"
+  id="brief-nomistakes-polling"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh $id --mode no-mistakes should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "Poll \`no-mistakes axi status\` in a loop within this same turn" "$brief" \
+    "$id: Definition of done missing the in-turn pipeline-polling instruction"
+  assert_grep "not an external wait" "$brief" \
+    "$id: Definition of done does not say a running pipeline step is the worker's own work"
+  pass "fm-brief.sh: no-mistakes Definition of done requires in-turn pipeline polling"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -766,6 +786,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_no_mistakes_dod_requires_in_turn_polling
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
