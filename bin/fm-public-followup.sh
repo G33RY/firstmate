@@ -61,8 +61,8 @@
 #       became delivery-ready, and one "rejected <event-id>: <reason>" line per
 #       refusal. Silent when there is nothing to do. Duplicate events and restart
 #       replay are no-ops.
-#       A loop bound to a REMOTE secondmate home is collected first: the staged
-#       results are pulled over that route into this home's own inbox and then
+#       An open loop bound to a REMOTE secondmate home is collected first: its
+#       staged results are pulled over that route into this home's own inbox and
 #       reconciled identically. The staged copy is retired only after this home
 #       holds the result, so a dropped connection cannot lose one. A route that
 #       could not be reached prints one "unreached <obligation-id>: ..." line and

@@ -405,7 +405,7 @@ test_duplicate_event_and_replay_are_noops() {
 test_invalid_events_are_refused_and_quarantined() {
   local home out events rejected
   home=$(make_home refusals)
-  seed_commitment "$home" pf-refuse req-refuse discord secondmate:fmdev work-real
+  seed_commitment "$home" pf-refuse req-refuse discord main work-real
 
   # Wrong source home and wrong work id are caught at the edge by the emitter,
   # because the owning home's own registration disagrees.
@@ -419,12 +419,12 @@ test_invalid_events_are_refused_and_quarantined() {
 
   expect_failure "a wrong work id must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
-    --source-home secondmate:fmdev --work-id work-other --generation 1 \
+    --source-home main --work-id work-other --generation 1 \
     --outcome pr-merged --deliverable pr_url=https://example.invalid/1 \
     --outcome-text 'x'
   expect_failure "a stale generation must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
-    --source-home secondmate:fmdev --work-id work-real --generation 0 \
+    --source-home main --work-id work-real --generation 0 \
     --outcome pr-merged --deliverable pr_url=https://example.invalid/1 \
     --outcome-text 'x'
 
@@ -441,7 +441,7 @@ test_invalid_events_are_refused_and_quarantined() {
   # A deliverable the expected-final type does not permit. The emitter accepts the
   # shape; tasks-axi is the authority that refuses the semantics.
   "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
-    --source-home secondmate:fmdev --work-id work-real --generation 1 \
+    --source-home main --work-id work-real --generation 1 \
     --outcome pr-merged --deliverable report_path=data/x/report.md \
     --outcome-text 'wrong deliverable for a merged PR' >/dev/null \
     || fail "the emitter should publish a shape-valid event"
@@ -453,7 +453,7 @@ test_invalid_events_are_refused_and_quarantined() {
   # A hand-edited event whose id no longer matches its own identity fields.
   jq -n '{schema_version:1, event_id:"forged", obligation_id:"pf-refuse",
           relation_id:"rel-code", work_id:"work-real", generation:1,
-          source_home_id:"secondmate:fmdev", outcome_type:"pr-merged",
+          source_home_id:"main", outcome_type:"pr-merged",
           deliverables:{pr_url:"https://example.invalid/9"},
           public_safe_outcome:"forged", occurred_at:"2026-07-30T12:00:00Z",
           successor:null}' > "$events/forged.json"
@@ -1112,10 +1112,10 @@ test_traversal_registration_is_refused_before_delivery() {
   seed_commitment "$home" pf-traversal req-traversal x main work-traversal
   emit_terminal "$home" "$home" pf-traversal main work-traversal >/dev/null \
     || fail "emit failed for traversal registration"
+  run_pf "$home" consume >/dev/null || fail "consume failed before traversal registration damage"
   sed -i.bak 's/^work_home=.*/work_home=secondmate:..\/..\/x/' \
     "$home/state/public-followup/registry/pf-traversal"
   rm -f "$home/state/public-followup/registry/pf-traversal.bak"
-  run_pf "$home" consume >/dev/null || fail "consume failed for traversal registration"
 
   out=$(FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-traversal 2>&1) && \
     fail "a traversal-shaped registration must not be deliverable"

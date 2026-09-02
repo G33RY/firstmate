@@ -9,7 +9,7 @@ This record supports six active guarantees for promised public replies made thro
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
 4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
 5. A public loop whose work lives in a REMOTE secondmate home retires when readable remote state proves no link exists, or after readable and writable remote state clears the matching bound legacy Relay link; unreadable state, a non-writable matching link, an identity mismatch, a metadata lock it cannot acquire within its bound, or unconfirmed completion retains the loop instead of hanging, and `--force` still covers only the unresolved obligation.
-6. Work bound to a REMOTE secondmate home can report its typed terminal result: the instructions name paths that exist on the worker's own machine, the owning home collects the result over that route, and a route it cannot reach is reported rather than read as an empty inbox.
+6. Work bound to a REMOTE secondmate home can report its typed terminal result: the instructions name paths that exist on the worker's own machine, the owning home collects results for open registrations over that route, an unreachable route fails loudly, an empty reachable route is a healthy no-op, and a non-open registration is skipped without contact.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -82,6 +82,7 @@ ok - pre-change registrations are open loops and un-rechainable, never a crash
 ok - teardown reports an unreconciled legacy Relay link
 ok - secondmate promotion matches teardown parent resolution
 ok - a public loop bound to a remote secondmate home delivers and retires
+ok - delivered remote registrations skip offline collection routes
 ok - --force still covers only the unresolved obligation, not the link clear
 ok - retire fails closed when a remote route is reassigned
 ok - retire fails closed when remote state is unreadable
@@ -91,9 +92,15 @@ ok - the guarded remote clear refuses a lock it cannot acquire instead of hangin
 ok - an unconfirmed remote clear is unknown completion, never a silent close
 ok - a typed terminal result emitted in a remote work home reaches the owning home
 ok - an unreachable remote work home fails loudly instead of reporting an empty inbox
+ok - an unreadable remote outbox fails collection without losing its result
+ok - invalid registration fails collection without dropping the staged result
+ok - unsafe registration entries fail collection without dropping staged results
+ok - route loss fails brief and consume without dropping the staged result
+ok - empty reachable remote collection remains a healthy no-op
+ok - remote brief rejects traversal and empty route path components
 ok - a local work home's emit path is unchanged
 ok - a duplicate report from a remote work home stays a no-op
-ok - staging refuses an ambiguous destination and a path that is not a firstmate home
+ok - staging requires the matching secondmate firstmate home
 ```
 
 The restart case is the end-to-end proof of guarantee 1.
@@ -123,13 +130,15 @@ A remote home running an older Firstmate copy does not recognize the guarded cle
 
 ## Reporting a terminal result from a remote work home
 
-The five emit-leg cases are the proof of guarantee 6.
+The twelve collection and emit cases are the proof of guarantee 6.
 They share the same faked-transport fixture as the retire cases above, so the collection that has to happen actually happens with no live host and no network.
 
-The first case pins the trap condition before asserting anything else: the instructions a remote-bound worker receives must not name the owning home's own path, which exists only on the owning machine.
+The first emit case pins the trap condition before asserting anything else: the instructions a remote-bound worker receives must not name the owning home's own path, which exists only on the owning machine.
 It then runs exactly the printed command, so what is verified is the instruction the worker actually gets rather than a hand-written approximation, and asserts the typed result reaches the owning home's inbox, that `consume` reports the loop ready, and that the staged copy is retired from the work home afterwards.
 The duplicate case replays both halves - the worker re-reports and the owning home re-collects - and asserts no second ready announcement and no change to the promise, so a retained staged copy after a failed retirement cannot produce a second public reply.
-The unreachable case drives the same route with a transport that never answers and asserts `consume` fails naming the route, says the result stays retained, and leaves the public loop untouched.
+The route and record refusal cases assert that unreachable transport, an unreadable outbox, invalid or unsafe registration state, and route loss all fail loudly without dropping the staged result.
+The empty-route case proves that a reachable route with nothing staged is an ordinary silent no-op, while the delivered-registration case proves a settled loop never contacts an offline route.
+The route-path and staging-destination cases prove that the printed remote command cannot target an unsafe or mismatched home.
 The local case asserts the unchanged path in the same terms: a main-home work binding is still told to emit straight into this home with this checkout's script, that command still runs as printed, and it still publishes into `events/` with nothing staged.
 
 Outward delivery for a remote-home loop is the separate legacy-link clear proven above, not part of this collection path.
