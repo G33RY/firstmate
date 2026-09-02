@@ -665,7 +665,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
   done
   printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
   fakebin=$(make_fakebin "$home")
-  FM_SNAPSHOT_SECONDMATE_CHILDREN=2 refresh_local_secondmate_ledgers "$home"
+  PATH="$fakebin:$PATH" FM_SNAPSHOT_SECONDMATE_CHILDREN=2 refresh_local_secondmate_ledgers "$home"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
