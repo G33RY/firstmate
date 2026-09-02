@@ -1875,6 +1875,10 @@ if (replacement.prompts.filter((message) => message.includes("signal: replacemen
 if (!replacement.prompts.some((message) => message.includes("could not clear a delivered replacement-session actionable wake"))) {
   throw new Error(`handoff cleanup failure was not surfaced: ${replacement.prompts.join(" | ")}`);
 }
+await new Promise((resolve) => setTimeout(resolve, 700));
+if (replacement.prompts.filter((message) => message.includes("could not clear a delivered replacement-session actionable wake")).length !== 1) {
+  throw new Error(`persistent handoff cleanup failure repeated alerts: ${replacement.prompts.join(" | ")}`);
+}
 await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
 const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
 if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {

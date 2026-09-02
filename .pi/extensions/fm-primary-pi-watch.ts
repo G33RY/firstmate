@@ -77,6 +77,7 @@ type SessionGeneration = {
   restoring: boolean;
   seq: number;
   pendingActionables: PendingActionableClose[];
+  cleanupFailure: string;
 };
 
 function refreshWatchToolShell(
@@ -359,6 +360,7 @@ function createGeneration(): SessionGeneration {
     restoring: false,
     seq: 0,
     pendingActionables: [],
+    cleanupFailure: "",
   };
 }
 
@@ -575,10 +577,16 @@ export default function (pi: ExtensionAPI) {
     clearReplacementHandoff(pending);
     const index = owner.pendingActionables.findIndex((item) => item.token === pending.token);
     if (index >= 0) owner.pendingActionables.splice(index, 1);
+    owner.cleanupFailure = "";
   }
 
-  function surfaceCleanupFailure(owner: SessionGeneration, error: unknown): void {
+  function surfaceCleanupFailure(
+    owner: SessionGeneration,
+    error: unknown,
+  ): void {
     const detail = error instanceof Error ? error.message : String(error);
+    if (owner.cleanupFailure === detail) return;
+    owner.cleanupFailure = detail;
     surfaceFailure(owner, `watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake\n${detail}`);
   }
 
