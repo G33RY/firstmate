@@ -138,6 +138,54 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop() {
   pass "a branch annotation and queue acknowledgement cannot consume the main drain's loss backstop"
 }
 
+test_same_second_outcome_uses_status_causal_position() {
+  local dir state first_out second_out epoch
+  dir=$(make_case same-second-causal-order)
+  state="$dir/state"
+  first_out="$dir/first.out"
+  second_out="$dir/second.out"
+  epoch=$(date +%s)
+
+  printf 'done: first completion\n' > "$state/same-second.status"
+  set_mtime "$epoch" "$state/same-second.status"
+  append_outcome "$state" same-second 'first completion handled'
+  set_mtime "$epoch" "$state/same-second.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first_out" \
+    || fail "main drain failed for same-second covered status"
+  [ ! -s "$first_out" ] \
+    || fail "a same-second handled status was re-presented: $(cat "$first_out")"
+
+  printf 'failed: genuinely later same-second event\n' >> "$state/same-second.status"
+  set_mtime "$epoch" "$state/same-second.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second_out" \
+    || fail "main drain failed for later same-second status"
+  grep -F 'same-second failed: genuinely later same-second event' "$second_out" >/dev/null \
+    || fail "a later same-second status was hidden by the older outcome: $(cat "$second_out")"
+  pass "status byte position distinguishes handled and later same-second events"
+}
+
+test_drain_does_not_scan_append_only_outcome_history() {
+  local dir state out i
+  dir=$(make_case bounded-history)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  printf 'done: covered before large history\n' > "$state/bounded-task.status"
+  append_outcome "$state" bounded-task 'covered before large history'
+  i=1
+  while [ "$i" -le 20000 ]; do
+    printf 'historical payload that the bounded drain must not parse %06d\n' "$i"
+    i=$((i + 1))
+  done >> "$state/branch-outcomes.jsonl"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "main drain failed with large append-only outcome history"
+  [ ! -s "$out" ] \
+    || fail "drain consulted malformed lifetime history instead of the bounded task index: $(cat "$out")"
+  pass "drain cost and suppression are independent of append-only outcome history"
+}
+
 test_backstop_output_is_bounded() {
   local dir state out old i payload count longest
   dir=$(make_case bounded-output)
@@ -167,4 +215,6 @@ test_uncovered_keyless_captain_events_surface_on_the_next_main_drain
 test_newer_task_outcome_and_routine_latest_events_stay_silent
 test_older_or_other_task_outcome_cannot_hide_a_new_captain_event
 test_branch_annotation_cannot_consume_the_main_resurfacing_backstop
+test_same_second_outcome_uses_status_causal_position
+test_drain_does_not_scan_append_only_outcome_history
 test_backstop_output_is_bounded

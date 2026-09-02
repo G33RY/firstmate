@@ -37,6 +37,12 @@
 #     the read cursor so rows delivered before the marker existed are not
 #     re-presented. A present marker is validated before the migration returns,
 #     and a marker ahead of the read cursor fails closed.
+#   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
+#     record for the latest outcome of that task: its outcome sequence and the
+#     identity plus byte endpoint of the task status log observed immediately
+#     before the outcome append. It is atomically replaced, never grows with
+#     outcome history, and lets wake-drain distinguish a covered status event
+#     from one appended later at the same whole-second timestamp.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -76,12 +82,16 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
 MAX_SAFE_SEQ=9007199254740991
+OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
+OUTCOME_INDEX_MAX_BYTES=512
 
 usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init | list [--recent <n>] | startup-replay" >&2
@@ -183,6 +193,41 @@ record_seq() { # <jsonl-line>
   printf '%s\n' "$1" | jq -er '.seq'
 }
 
+outcome_index_path() { # <task>
+  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s/.%s.branch-outcome-index' "$STATE" "$1"
+}
+
+capture_status_position() { # <task>
+  local f="$STATE/$1.status" size ident size_after ident_after
+  CAPTURED_STATUS_ENDPOINT=0
+  CAPTURED_STATUS_IDENT=-
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  size=$(_fm_status_file_size "$f") || return 0
+  size=${size//[[:space:]]/}
+  ident=$(_fm_open_decisions_file_ident "$f") || return 0
+  size_after=$(_fm_status_file_size "$f") || return 0
+  size_after=${size_after//[[:space:]]/}
+  ident_after=$(_fm_open_decisions_file_ident "$f") || return 0
+  case "$size:$size_after" in *[!0-9:]*) return 0 ;; esac
+  [ "$size" = "$size_after" ] && [ "$ident" = "$ident_after" ] || return 0
+  case "$ident" in *$'\t'*|*$'\n'*|'') return 0 ;; esac
+  CAPTURED_STATUS_ENDPOINT=$size
+  CAPTURED_STATUS_IDENT=$ident
+}
+
+write_outcome_index() { # <task> <seq>
+  local task=$1 seq=$2 path tmp record
+  path=$(outcome_index_path "$task") || return 1
+  record=$(printf '%s\t%s\t%s\t%s\n' "$OUTCOME_INDEX_VERSION" "$seq" \
+    "$CAPTURED_STATUS_ENDPOINT" "$CAPTURED_STATUS_IDENT") || return 1
+  [ "${#record}" -le "$OUTCOME_INDEX_MAX_BYTES" ] || return 1
+  tmp=$(mktemp "$STATE/.branch-outcome-index.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$record" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path"
+}
+
 print_unread() {
   local cursor last
   cursor=$(read_cursor)
@@ -262,6 +307,7 @@ case "$CMD" in
       esac
     done
     [ -n "$TASK" ] || usage
+    outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
@@ -281,9 +327,15 @@ case "$CMD" in
       exit 1
     fi
     SEQ=$(( LAST_SEQ + 1 ))
+    capture_status_position "$TASK"
     printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" >> "$STORE"
+    if ! write_outcome_index "$TASK" "$SEQ"; then
+      fm_lock_release "$LOCK"
+      echo "error: outcome was stored but its bounded task index could not be updated" >&2
+      exit 1
+    fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
     ;;

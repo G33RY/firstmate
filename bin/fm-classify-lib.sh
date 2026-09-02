@@ -865,12 +865,14 @@ status_presentation_snapshot() {  # <state>
 # tail is deliberately left for its ordinary signal annotation.
 FM_STATUS_SNAPSHOT_EVENT_LINE=
 FM_STATUS_SNAPSHOT_EVENT_MTIME=
+FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
 # shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
 status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-identity>
-  local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch line
+  local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch record line event_endpoint
   local before_mtime after_mtime before_size after_size before_ident after_ident skip_first=0
   FM_STATUS_SNAPSHOT_EVENT_LINE=
   FM_STATUS_SNAPSHOT_EVENT_MTIME=
+  FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
   case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
   [ -n "$expected_ident" ] || return 1
 
@@ -891,12 +893,24 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   scratch="$(_fm_status_span_scratch "$f").latest"
   _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
     || { rm -f "$scratch"; return 1; }
-  line=$(awk -v skip_first="$skip_first" '
-    skip_first && NR == 1 { next }
-    /[^[:space:]]/ { latest=$0; found=1 }
-    END { if (found) printf "%s", latest }
-  ' "$scratch") || { rm -f "$scratch"; return 1; }
+  record=$(LC_ALL=C perl -e '
+    my ($path, $start, $skip_first) = @ARGV;
+    open my $file, "<", $path or exit 1;
+    binmode $file;
+    scalar(<$file>) if $skip_first;
+    my ($latest, $end);
+    while (defined(my $line = <$file>)) {
+      next unless $line =~ /[^\s]/;
+      $line =~ s/[\r\n]+\z//;
+      ($latest, $end) = ($line, $start + tell($file));
+    }
+    exit 1 unless defined $end;
+    print "$end\t$latest";
+  ' "$scratch" "$start" "$skip_first") || { rm -f "$scratch"; return 1; }
   rm -f "$scratch"
+  event_endpoint=${record%%$'\t'*}
+  line=${record#*$'\t'}
+  case "$event_endpoint" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$line" ] || return 1
 
   after_mtime=$(_fm_status_file_mtime "$f") || return 1
@@ -911,6 +925,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 
   FM_STATUS_SNAPSHOT_EVENT_LINE=$line
   FM_STATUS_SNAPSHOT_EVENT_MTIME=$before_mtime
+  FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
 status_presentation_cursor_offset() {  # <status-file>
