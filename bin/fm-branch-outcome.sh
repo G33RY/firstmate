@@ -66,8 +66,9 @@
 #     through <seq>; the target itself must be a currently unprocessed captain
 #     row at or below the read cursor.
 #   fm-branch-outcome.sh processed-init
-#     Create the processed marker at the current read cursor when it does not
-#     exist yet; validate a present marker without changing it.
+#     Rebuild the bounded per-task outcome indexes, then create the processed
+#     marker at the current read cursor when it does not exist yet; validate a
+#     present marker without changing it.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
