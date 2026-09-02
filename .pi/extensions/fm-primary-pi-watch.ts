@@ -78,6 +78,7 @@ type SessionGeneration = {
   seq: number;
   pendingActionables: PendingActionableClose[];
   cleanupFailure: string;
+  wakeAcknowledgements: Map<string, { content: string; settle: (consumed: boolean) => void }>;
 };
 
 function refreshWatchToolShell(
@@ -361,6 +362,7 @@ function createGeneration(): SessionGeneration {
     seq: 0,
     pendingActionables: [],
     cleanupFailure: "",
+    wakeAcknowledgements: new Map(),
   };
 }
 
@@ -424,6 +426,7 @@ export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
 
+  let agentActive = false;
   let calmPresentation: CalmPresentationState = {
     active: false,
     stockExportRendering: false,
@@ -443,13 +446,32 @@ export default function (pi: ExtensionAPI) {
   async function sendWake(
     owner: SessionGeneration,
     message: string,
-  ): Promise<void> {
-    if (!generationIsLive(owner)) return;
+    token?: string,
+  ): Promise<boolean> {
+    if (!generationIsLive(owner)) return false;
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
+    if (!token) {
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      return generationIsLive(owner);
+    }
+    let settleConsumption: (consumed: boolean) => void = () => {};
+    const consumption = new Promise<boolean>((resolveConsumption) => {
+      settleConsumption = resolveConsumption;
+    });
+    owner.wakeAcknowledgements.set(token, { content, settle: settleConsumption });
+    const queuedBehindActiveAgent = agentActive;
+    try {
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      if (!queuedBehindActiveAgent && owner.wakeAcknowledgements.delete(token)) settleConsumption(true);
+      return await consumption;
+    } catch (error) {
+      owner.wakeAcknowledgements.delete(token);
+      settleConsumption(false);
+      throw error;
+    }
   }
 
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
@@ -517,6 +539,7 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     message: string,
     repairFailed: boolean,
+    token: string,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
@@ -527,19 +550,19 @@ export default function (pi: ExtensionAPI) {
         if (!pidAlive(watcherPid)) {
           await retireArm(owner.child);
         }
-        await sendWake(owner, `${message}\n\n${confirmed.detail}`);
-        return generationIsLive(owner);
+        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, token);
       }
     }
     if (!repairFailed) {
       const branchDelivery = offerWakeToBranch(message);
       if (branchDelivery) {
-        await branchDelivery;
-        return true;
+        try {
+          await branchDelivery;
+          return true;
+        } catch {}
       }
     }
-    await sendWake(owner, message);
-    return generationIsLive(owner);
+    return await sendWake(owner, message, token);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -647,7 +670,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending.token, restoration.recovery);
           if (!delivered) {
             settleClaim("failed");
             releaseClaim();
@@ -895,6 +918,21 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  pi.on?.("agent_start", () => {
+    agentActive = true;
+  });
+  pi.on?.("agent_settled", () => {
+    agentActive = false;
+  });
+  pi.on?.("before_agent_start", (event) => {
+    for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
+      if (acknowledgement.content !== event.prompt) continue;
+      generation.wakeAcknowledgements.delete(token);
+      acknowledgement.settle(true);
+      break;
+    }
+  });
+
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
@@ -924,6 +962,9 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("session_shutdown", async (event) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
+    agentActive = false;
+    for (const acknowledgement of generation.wakeAcknowledgements.values()) acknowledgement.settle(false);
+    generation.wakeAcknowledgements.clear();
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   });

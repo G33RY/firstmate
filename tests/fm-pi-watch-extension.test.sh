@@ -1899,6 +1899,90 @@ EOF
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
 
+test_pi_streaming_followup_is_replayed_after_replacement() {
+  local repo home plugin trigger out status
+  repo="$TMP_ROOT/pi-streaming-followup-replacement-root"
+  home="$TMP_ROOT/pi-streaming-followup-replacement-home"
+  trigger="$TMP_ROOT/pi-streaming-followup-replacement.trigger"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: streaming queued actionable outcome\n'
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TRIGGER_FILE="$trigger" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool() {},
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, prompts };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi();
+originalMod.default(original.pi);
+await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+original.handlers.get("agent_start")?.({}, {});
+writeFileSync(process.env.FM_TRIGGER_FILE, "trigger\n");
+await waitFor(
+  () => original.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "old-session queued follow-up",
+);
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-followup`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "replacement-session replay",
+);
+if (replacement.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
+  throw new Error(`replacement did not replay the unconsumed follow-up exactly once: ${replacement.prompts.join(" | ")}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must replay a streaming follow-up before consumption"
+  [ -z "$out" ] || fail "Pi streaming follow-up replacement test printed output: $out"
+  pass "Pi replacement replays a streaming follow-up before consumption"
+}
+
 test_pi_late_retiring_actionable_reaches_replacement() {
   local repo home plugin count out status
   repo="$TMP_ROOT/pi-late-retiring-actionable-root"
@@ -3268,6 +3352,7 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
+test_pi_streaming_followup_is_replayed_after_replacement
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_stops_arm_child

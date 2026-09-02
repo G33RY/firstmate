@@ -1136,19 +1136,6 @@ ${context.command}
     }
   }
 
-  async function fallbackToMain(message: string, detail: string): Promise<void> {
-    const body = `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. (Supervision branch unavailable, falling back to main: ${detail})`;
-    let content = body;
-    try {
-      // Marked operational like every watcher injection, so the wake is never
-      // mistaken for captain input (away-mode return semantics, mirror filter).
-      content = encodeFirstmateOperationalInput("watcher", body);
-    } catch {
-      // An encoding failure must not lose the wake; deliver it unmarked.
-    }
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
-  }
-
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
     const delivery = branchChain
@@ -1212,9 +1199,9 @@ ${context.command}
           throw new Error("could not release the branch's settled wake-row grant");
         }
       })
-      .catch(async (error: unknown) => {
+      .catch((error: unknown) => {
         releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
-        await fallbackToMain(message, error instanceof Error ? error.message : String(error));
+        throw error;
       })
       .finally(() => {
         if (recoveryProbe) finishProviderProbe(acceptedGeneration, acceptedSelectionRevision);

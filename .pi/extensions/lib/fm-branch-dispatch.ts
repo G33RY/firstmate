@@ -9,11 +9,11 @@ import { readdirSync, readFileSync } from "node:fs";
 // FM_BRANCH_DISPATCH_EVENT. A live, enabled branch extension calls accept()
 // SYNCHRONOUSLY inside its handler (the event bus invokes handlers
 // synchronously up to their first await), so after emit returns the watcher
-// reads `accepted`: true means the branch now owns delivering and handling the
-// wake (including its own fallback back to main on a later failure), and its
-// settlement promise keeps the watcher outcome pending until that delivery
-// finishes; false means no branch took it and the watcher delivers to main
-// exactly as it did before the branch existed. Watcher-failure alarms are never offered - only
+// reads `accepted`: true means the branch owns handling the wake, and its
+// settlement promise keeps the watcher outcome pending until handling finishes
+// or rejects back to the watcher's consumption-acknowledged main path; false
+// means no branch took it and the watcher delivers to main exactly as it did
+// before the branch existed. Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
