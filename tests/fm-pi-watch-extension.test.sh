@@ -1208,14 +1208,18 @@ import { pathToFileURL } from "node:url";
 
 let tool = null;
 const prompts = [];
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async (message) => {
     prompts.push(message);
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: message }, {}));
   },
 };
 const rows = () => existsSync(process.env.FM_ARM_LOG)
@@ -1974,6 +1978,21 @@ await waitFor(
 if (replacement.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
   throw new Error(`replacement did not replay the unconsumed follow-up exactly once: ${replacement.prompts.join(" | ")}`);
 }
+await replacement.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const finalMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=idle-followup`);
+const finalSession = makePi();
+finalMod.default(finalSession.pi);
+await finalSession.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => finalSession.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "second replacement replay before idle consumption",
+);
+if (finalSession.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
+  throw new Error(`second replacement did not replay the idle queued follow-up exactly once: ${finalSession.prompts.join(" | ")}`);
+}
+finalSession.handlers.get("before_agent_start")?.({ prompt: finalSession.prompts[0] }, {});
+await new Promise((resolve) => setTimeout(resolve, 20));
 process.exit(0);
 EOF
 )

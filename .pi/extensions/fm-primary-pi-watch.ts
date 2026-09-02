@@ -426,7 +426,6 @@ export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
 
-  let agentActive = false;
   let calmPresentation: CalmPresentationState = {
     active: false,
     stockExportRendering: false,
@@ -462,10 +461,8 @@ export default function (pi: ExtensionAPI) {
       settleConsumption = resolveConsumption;
     });
     owner.wakeAcknowledgements.set(token, { content, settle: settleConsumption });
-    const queuedBehindActiveAgent = agentActive;
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
-      if (!queuedBehindActiveAgent && owner.wakeAcknowledgements.delete(token)) settleConsumption(true);
       return await consumption;
     } catch (error) {
       owner.wakeAcknowledgements.delete(token);
@@ -697,6 +694,7 @@ export default function (pi: ExtensionAPI) {
       if (generationIsLive(owner)) {
         owner.restoring = false;
         if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
+        if (!owner.child && !owner.retryTimer) startArm(owner);
       }
     }
   }
@@ -918,12 +916,6 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  pi.on?.("agent_start", () => {
-    agentActive = true;
-  });
-  pi.on?.("agent_settled", () => {
-    agentActive = false;
-  });
   pi.on?.("before_agent_start", (event) => {
     for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
       if (acknowledgement.content !== event.prompt) continue;
@@ -953,8 +945,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (generation.pendingActionables.length > 0) {
       if (loadFailure) surfaceFailure(generation, loadFailure);
-      await processPendingActionables(generation);
-      if (generationIsLive(generation) && !generation.child && !generation.retryTimer) startArm(generation);
+      void processPendingActionables(generation);
       return;
     }
     const result = startArm(generation);
@@ -962,7 +953,6 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("session_shutdown", async (event) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
-    agentActive = false;
     for (const acknowledgement of generation.wakeAcknowledgements.values()) acknowledgement.settle(false);
     generation.wakeAcknowledgements.clear();
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
