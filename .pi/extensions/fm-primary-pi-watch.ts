@@ -128,10 +128,16 @@ let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
 type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
 type ReplacementCoordinatorGlobal = typeof globalThis & {
-  __firstmatePiWatchReplacement?: { receiver: ReplacementActionableReceiver | null };
+  __firstmatePiWatchReplacement?: {
+    receiver: ReplacementActionableReceiver | null;
+    pending: PendingActionableClose[];
+  };
 };
 const replacementCoordinatorGlobal = globalThis as ReplacementCoordinatorGlobal;
-const replacementCoordinator = replacementCoordinatorGlobal.__firstmatePiWatchReplacement ??= { receiver: null };
+const replacementCoordinator = replacementCoordinatorGlobal.__firstmatePiWatchReplacement ??= {
+  receiver: null,
+  pending: [],
+};
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
@@ -530,8 +536,21 @@ export default function (pi: ExtensionAPI) {
     if (owner.pendingActionables.some((item) => item.token === pending.token)) return;
     owner.pendingActionables.push(pending);
     if (owner.stopping && owner.replacement) {
-      mergeReplacementHandoff(pending);
-      replacementCoordinator.receiver?.(pending);
+      let replacementPending = pending;
+      try {
+        mergeReplacementHandoff(pending);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        replacementPending = {
+          ...pending,
+          message: `${pending.message}\n\nwatcher: FAILED - Pi extension could not persist a late replacement-session actionable wake\n${detail}`,
+        };
+      }
+      if (replacementCoordinator.receiver) {
+        replacementCoordinator.receiver(replacementPending);
+      } else if (replacementPending !== pending) {
+        replacementCoordinator.pending.push(replacementPending);
+      }
     }
   }
 
@@ -782,9 +801,10 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
-    replacementCoordinator.receiver = receiveReplacementActionable;
     markLoaded();
     if (lockOwnership() !== "owned") return;
+    replacementCoordinator.receiver = receiveReplacementActionable;
+    const inProcessPending = replacementCoordinator.pending.splice(0);
     let pending: PendingActionableClose[] = [];
     try {
       pending = loadReplacementHandoff();
@@ -794,8 +814,10 @@ export default function (pi: ExtensionAPI) {
       surfaceFailure(generation, `watcher: FAILED - Pi extension could not load a replacement-session actionable wake\n${detail}\n${result.message}`);
       return;
     }
-    if (pending.length > 0) {
-      for (const actionable of pending) enqueuePendingActionable(generation, actionable);
+    for (const actionable of [...pending, ...inProcessPending]) {
+      enqueuePendingActionable(generation, actionable);
+    }
+    if (generation.pendingActionables.length > 0) {
       await processPendingActionables(generation);
       return;
     }

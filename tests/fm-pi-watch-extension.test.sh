@@ -1952,12 +1952,17 @@ const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?r
 const replacement = makePi();
 replacementMod.default(replacement.pi);
 await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block late handoff publication\n");
 await waitFor(
   () => replacement.prompts.some((message) => message.includes("signal: late retiring actionable outcome")),
   "late actionable delivery to replacement",
 );
-if (replacement.prompts.filter((message) => message.includes("signal: late retiring actionable outcome")).length !== 1) {
+const latePrompts = replacement.prompts.filter((message) => message.includes("signal: late retiring actionable outcome"));
+if (latePrompts.length !== 1) {
   throw new Error(`replacement did not receive exactly one late outcome: ${replacement.prompts.join(" | ")}`);
+}
+if (!latePrompts[0].includes("watcher: FAILED - Pi extension could not persist a late replacement-session actionable wake")) {
+  throw new Error(`late handoff publication failure was not surfaced: ${latePrompts[0]}`);
 }
 process.exit(0);
 EOF
