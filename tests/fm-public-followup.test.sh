@@ -2735,6 +2735,7 @@ test_remote_work_home_emit_reaches_owning_home() {
   # literally executable there.
   command=${command//<value>/data/work-remote/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished its investigation.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the worker's own instructions must run in its home"
 
   staged=$(run_pf_remote "$home" consume) || fail "consume failed: $staged"
@@ -2765,6 +2766,7 @@ test_remote_collection_is_idempotent() {
   command=$(brief_emit_command "$out")
   command=${command//<value>/data/work-twice/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished its investigation.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the worker's own instructions must run in its home"
   staged=$(run_pf_remote "$home" consume) || fail "consume failed: $staged"
   assert_contains "$staged" "ready pf-remote-twice" "the first collection must report the loop ready"
@@ -2785,7 +2787,7 @@ test_remote_collection_is_idempotent() {
 # than resolved by argument order, and a staging path that is not a firstmate
 # home is refused rather than swallowing the result.
 test_stage_in_refuses_ambiguous_or_unusable_homes() {
-  local home
+  local home unrelated
   home=$(make_home stage-in-refusals)
   seed_repro_commitment "$home" pf-stage-refuse req-stage-refuse main work-stage
 
@@ -2797,17 +2799,27 @@ test_stage_in_refuses_ambiguous_or_unusable_homes() {
   assert_contains "$EXPECT_OUT" "mutually exclusive" \
     "the refusal must say the two home flags cannot be combined"
 
-  mkdir -p "$home/not-a-home"
-  expect_failure "a staging path that is not a firstmate home must be refused" \
-    "$EMIT" --stage-in "$home/not-a-home" --obligation pf-stage-refuse \
-    --relation rel-code --source-home main --work-id work-stage --generation 1 \
+  unrelated="$home/not-a-home"
+  mkdir -p "$unrelated/state"
+  expect_failure "an ordinary directory with state must not pass as a staging home" \
+    "$EMIT" --stage-in "$unrelated" --obligation pf-stage-refuse \
+    --relation rel-code --source-home secondmate:mate --work-id work-stage --generation 1 \
     --outcome report-ready --deliverable report_path=data/work-stage/report.md \
     --outcome-text 'Nowhere to be collected from.'
   assert_contains "$EXPECT_OUT" "firstmate home" \
     "the refusal must name what --stage-in has to point at"
-  assert_absent "$home/not-a-home/state" \
-    "a refused staging path must gain nothing"
-  pass "staging refuses an ambiguous destination and a path that is not a firstmate home"
+  assert_absent "$unrelated/state/public-followup" \
+    "a refused staging path must gain no outbox"
+
+  printf 'someone-else\n' > "$unrelated/.fm-secondmate-home"
+  expect_failure "a staging home's identity must match --source-home" \
+    "$EMIT" --stage-in "$unrelated" --obligation pf-stage-refuse \
+    --relation rel-code --source-home secondmate:mate --work-id work-stage --generation 1 \
+    --outcome report-ready --deliverable report_path=data/work-stage/report.md \
+    --outcome-text 'Wrong home.'
+  assert_absent "$unrelated/state/public-followup" \
+    "an identity mismatch must gain no outbox"
+  pass "staging requires the matching secondmate firstmate home"
 }
 
 # The owning home must never quietly report "nothing waiting" when it simply
@@ -2830,6 +2842,62 @@ test_remote_collection_transport_failure_is_loud() {
   [ "$(delivery_state "$home" pf-remote-down)" != posted ] \
     || fail "an unreachable work home must never advance the public loop"
   pass "an unreachable remote work home fails loudly instead of reporting an empty inbox"
+}
+
+test_remote_route_loss_fails_brief_and_collection() {
+  local home remote out command
+  remote_fixture_prepare
+  home=$(make_home remote-route-lost)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-route-lost req-route-lost secondmate:mini-default work-lost
+
+  out=$(run_pf "$home" brief pf-route-lost) || fail "brief failed before route loss: $out"
+  command=$(brief_emit_command "$out")
+  command=${command//<value>/data/work-lost/report.md}
+  command=${command//<one bounded public-safe sentence>/The remote lane finished before its route record was lost.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the staged result must exist before route loss"
+  rm -f "$home/data/secondmates.md"
+
+  expect_failure "brief must refuse an unresolved remote registration" \
+    run_pf "$home" brief pf-route-lost
+  assert_contains "$EXPECT_OUT" "data/secondmates.md" \
+    "brief must point at the route record that needs repair"
+
+  expect_failure "consume must refuse an unresolved remote registration" \
+    run_pf_remote "$home" consume
+  assert_contains "$EXPECT_OUT" "pf-route-lost" \
+    "consume must name the obligation whose route was lost"
+  assert_contains "$EXPECT_OUT" "mini-default" \
+    "consume must name the unresolved route"
+  assert_contains "$EXPECT_OUT" "retained for reconciliation" \
+    "consume must say the staged result remains reconcilable"
+  [ -n "$(ls -A "$remote/state/public-followup/outbox" 2>/dev/null)" ] \
+    || fail "route loss must leave the staged result in its remote outbox"
+  pass "route loss fails brief and consume without dropping the staged result"
+}
+
+test_remote_brief_rejects_traversal_route_paths() {
+  local home remote
+  remote_fixture_prepare
+  home=$(make_home remote-route-paths)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-route-paths req-route-paths secondmate:mini-default work-paths
+
+  cat > "$home/data/secondmates.md" <<EOF
+- mini-default - remote lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT/../remote-root; home: $remote; scope: relay work; projects: firstmate; added 2026-08-02)
+EOF
+  expect_failure "brief must reject a traversal component in the remote root" \
+    run_pf "$home" brief pf-route-paths
+  assert_contains "$EXPECT_OUT" "no usable code root and home" \
+    "a traversal route must use the route-record refusal"
+
+  cat > "$home/data/secondmates.md" <<EOF
+- mini-default - remote lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: //$remote; scope: relay work; projects: firstmate; added 2026-08-02)
+EOF
+  expect_failure "brief must reject an empty component in the remote home" \
+    run_pf "$home" brief pf-route-paths
+  pass "remote brief rejects traversal and empty route path components"
 }
 
 # A local work home is on this machine, so nothing about its instructions or its
@@ -2932,6 +3000,8 @@ test_remote_retire_refuses_unacquirable_lock_without_hanging
 test_remote_unconfirmed_clear_is_unknown_completion
 test_remote_work_home_emit_reaches_owning_home
 test_remote_collection_transport_failure_is_loud
+test_remote_route_loss_fails_brief_and_collection
+test_remote_brief_rejects_traversal_route_paths
 test_local_work_home_emit_path_is_unchanged
 test_remote_collection_is_idempotent
 test_stage_in_refuses_ambiguous_or_unusable_homes

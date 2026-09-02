@@ -204,8 +204,18 @@ esac
 # A staged event is only ever found again by the collecting home reading this
 # home's state tree, so a path that is not a firstmate home would swallow the
 # result silently. Refuse it here instead.
-[ "$HOME_MODE" != staging ] || { [ -d "$HOME_DIR/state" ] && [ ! -L "$HOME_DIR/state" ]; } \
-  || die "--stage-in must name a firstmate home, and '$HOME_DIR' has no state directory"
+if [ "$HOME_MODE" = staging ]; then
+  case "$SOURCE_HOME" in
+    secondmate:*) STAGING_HOME_ID=${SOURCE_HOME#secondmate:} ;;
+    *) die "--stage-in must name the secondmate firstmate home identified by --source-home" ;;
+  esac
+  [ -d "$HOME_DIR/state" ] && [ ! -L "$HOME_DIR/state" ] \
+    && [ -f "$HOME_DIR/.fm-secondmate-home" ] && [ ! -L "$HOME_DIR/.fm-secondmate-home" ] \
+    || die "--stage-in must name the secondmate firstmate home identified by --source-home"
+  STAGING_HOME_MARKER=$(sed -n '1p' "$HOME_DIR/.fm-secondmate-home" 2>/dev/null) || STAGING_HOME_MARKER=
+  [ "$STAGING_HOME_MARKER" = "$STAGING_HOME_ID" ] \
+    || die "--stage-in must name the secondmate firstmate home identified by --source-home"
+fi
 
 STATE="$HOME_DIR/state"
 if [ "$HOME_MODE" = owning ]; then

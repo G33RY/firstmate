@@ -348,18 +348,30 @@ cmd_register() {
 
 # --- subcommand: brief ------------------------------------------------------
 
-# brief_emit_target <work-home>: two lines on stdout - the absolute path of the
-# emit script the bound worker must run, and the home flag plus value it must
-# pass. They differ for a REMOTE work home, because both this checkout's path and
-# this home's path exist only on THIS machine: naming either one in instructions
-# for another machine is how a promised public reply silently never arrives.
+# public_followup_route_kind <secondmate-id> <recorded-local-home>: print remote
+# or local only when the current route still proves which transport owns it.
+public_followup_route_kind() {
+  local id=$1 recorded_home=$2 resolved
+  if public_followup_route_is_remote "$id"; then
+    printf 'remote\n'
+    return 0
+  fi
+  [ -n "$recorded_home" ] || return 1
+  resolved=$(public_followup_secondmate_home "$id" 2>/dev/null) || return 1
+  [ "$resolved" = "$recorded_home" ] || return 1
+  printf 'local\n'
+}
+
+# brief_emit_target <work-home> <recorded-local-home>: two lines on stdout - the
+# absolute path of the emit script the bound worker must run, and its home flag.
 brief_emit_target() {
-  local work_home=$1 sid root home
+  local work_home=$1 recorded_home=${2:-} sid kind root home configured_path
   case "$work_home" in
     secondmate:*) sid=${work_home#secondmate:} ;;
     *) printf '%s\n--home %s\n' "$FM_ROOT/bin/fm-public-followup-emit.sh" "$FM_HOME"; return 0 ;;
   esac
-  if ! public_followup_route_is_remote "$sid"; then
+  kind=$(public_followup_route_kind "$sid" "$recorded_home") || return 1
+  if [ "$kind" = local ]; then
     printf '%s\n--home %s\n' "$FM_ROOT/bin/fm-public-followup-emit.sh" "$FM_HOME"
     return 0
   fi
@@ -367,14 +379,16 @@ brief_emit_target() {
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$sid" home 2>/dev/null) || home=
   case "$root" in /*) ;; *) return 1 ;; esac
   case "$home" in /*) ;; *) return 1 ;; esac
-  # These two values are printed into a command line the worker runs verbatim, so
-  # keep them to a conservative path charset rather than trusting the record.
   case "$root$home" in *[!A-Za-z0-9/._+@:-]*) return 1 ;; esac
+  for configured_path in "$root" "$home"; do
+    case "/$configured_path/" in */../*|*/./*) return 1 ;; esac
+    case "$configured_path" in *'//'*) return 1 ;; esac
+  done
   printf '%s\n--stage-in %s\n' "$root/bin/fm-public-followup-emit.sh" "$home"
 }
 
 cmd_brief() {
-  local id=${1:-} relation work_home work_id generation payload outcome keys key deliverable_flags
+  local id=${1:-} relation work_home work_home_path work_id generation payload outcome keys key deliverable_flags
   local emit_target emit_script emit_home_flag closing_note
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
@@ -384,10 +398,11 @@ cmd_brief() {
 
   relation=$(fm_pf_registry_get "$STATE" "$id" relation_id)
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+  work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" generation)
 
-  emit_target=$(brief_emit_target "$work_home") \
+  emit_target=$(brief_emit_target "$work_home" "$work_home_path") \
     || die "the work home for '$id' is a remote route with no usable code root and home in data/secondmates.md; fix that record before briefing the bound worker" 1
   emit_script=$(printf '%s\n' "$emit_target" | sed -n '1p')
   emit_home_flag=$(printf '%s\n' "$emit_target" | sed -n '2p')
@@ -488,7 +503,7 @@ reject_event() {
 # reported by name and never passed off as an empty inbox: the promise is still
 # owed, and the staged result is still on that host.
 collect_remote_staged_events() {
-  local dir file id work_home sid rc=0 collect_rc payload line event_id dropped
+  local dir file id work_home work_home_path sid route_kind rc=0 collect_rc payload line event_id dropped
   dir=$(fm_pf_registry_dir "$STATE")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   for file in "$dir"/*; do
@@ -497,7 +512,14 @@ collect_remote_staged_events() {
     fm_pf_slug_valid "$id" || continue
     work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
     case "$work_home" in secondmate:*) sid=${work_home#secondmate:} ;; *) continue ;; esac
-    public_followup_route_is_remote "$sid" || continue
+    work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
+    route_kind=$(public_followup_route_kind "$sid" "$work_home_path") || {
+      printf 'unreached %s: the work home route %s cannot be resolved; its terminal result stays retained for reconciliation; fix data/secondmates.md\n' \
+        "$id" "$sid"
+      rc=1
+      continue
+    }
+    [ "$route_kind" = remote ] || continue
     command -v jq >/dev/null 2>&1 \
       || die "jq is required to collect a terminal result from a remote work home" 1
 
@@ -508,13 +530,13 @@ collect_remote_staged_events() {
     # "delivered but completion unknown" status this codebase reconciles rather
     # than reads as done or refused.
     if [ "$collect_rc" -eq 255 ]; then
-      printf 'unreached %s: the work home %s never answered, so its terminal result stays retained there\n' \
+      printf 'unreached %s: the work home %s never answered, so its terminal result stays retained there for reconciliation\n' \
         "$id" "$sid"
       rc=1
       continue
     fi
     if [ "$collect_rc" -ne 0 ]; then
-      printf 'unreached %s: the work home %s refused the collection (exit %s), so its terminal result stays retained there\n' \
+      printf 'unreached %s: the work home %s refused the collection (exit %s), so its terminal result stays retained there for reconciliation\n' \
         "$id" "$sid" "$collect_rc"
       rc=1
       continue
