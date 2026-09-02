@@ -36,7 +36,7 @@
 # including an empty outbox and an outbox holding a file too large or too broken
 # to hand over - that one is named on stderr and left in place rather than
 # blocking every other staged result. Exit 2 on a usage or validation error, and
-# 1 when a retirement was asked for and could not be completed.
+# 1 when the outbox cannot be safely read or a retirement cannot be completed.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,7 +76,11 @@ cmd_drain() {
   command -v jq >/dev/null 2>&1 || die "jq is required to read a staged terminal event" 1
 
   dir=$(fm_pf_outbox_dir "$STATE")
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    return 0
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] \
+    || die "staged-event outbox is not a safely readable directory: $dir" 1
   for file in "$dir"/*.json; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     event_id=$(basename "$file" .json)

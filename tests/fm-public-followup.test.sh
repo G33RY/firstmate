@@ -2844,6 +2844,35 @@ test_remote_collection_transport_failure_is_loud() {
   pass "an unreachable remote work home fails loudly instead of reporting an empty inbox"
 }
 
+test_remote_collection_refuses_unreadable_outbox() {
+  local home remote out command rc=0
+  remote_fixture_prepare
+  home=$(make_home remote-outbox-unreadable)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-outbox-unreadable req-outbox-unreadable secondmate:mini-default work-unreadable
+
+  out=$(run_pf "$home" brief pf-outbox-unreadable) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  command=${command//<value>/data/work-unreadable/report.md}
+  command=${command//<one bounded public-safe sentence>/The result remains staged while its outbox is unreadable.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the worker must stage its terminal result"
+
+  chmod 000 "$remote/state/public-followup/outbox"
+  out=$(run_pf_remote "$home" consume 2>&1) || rc=$?
+  chmod 700 "$remote/state/public-followup/outbox"
+  [ "$rc" -ne 0 ] || fail "an unreadable remote outbox must make consume fail"
+  assert_contains "$out" "pf-outbox-unreadable" \
+    "consume must name the obligation whose outbox is unreadable"
+  assert_contains "$out" "mini-default" \
+    "consume must name the route whose outbox is unreadable"
+  assert_contains "$out" "retained" \
+    "consume must report the staged result as retained"
+  [ -n "$(ls -A "$remote/state/public-followup/outbox")" ] \
+    || fail "an unreadable outbox failure must retain the staged result"
+  pass "an unreadable remote outbox fails collection without losing its result"
+}
+
 test_remote_route_loss_fails_brief_and_collection() {
   local home remote out command
   remote_fixture_prepare
@@ -3000,6 +3029,7 @@ test_remote_retire_refuses_unacquirable_lock_without_hanging
 test_remote_unconfirmed_clear_is_unknown_completion
 test_remote_work_home_emit_reaches_owning_home
 test_remote_collection_transport_failure_is_loud
+test_remote_collection_refuses_unreadable_outbox
 test_remote_route_loss_fails_brief_and_collection
 test_remote_brief_rejects_traversal_route_paths
 test_local_work_home_emit_path_is_unchanged
