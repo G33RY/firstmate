@@ -10,9 +10,10 @@ import { readdirSync, readFileSync } from "node:fs";
 // SYNCHRONOUSLY inside its handler (the event bus invokes handlers
 // synchronously up to their first await), so after emit returns the watcher
 // reads `accepted`: true means the branch now owns delivering and handling the
-// wake (including its own fallback back to main on a later failure); false
-// means no branch took it and the watcher delivers to main exactly as it did
-// before the branch existed. Watcher-failure alarms are never offered - only
+// wake (including its own fallback back to main on a later failure), and its
+// settlement promise keeps the watcher outcome pending until that delivery
+// finishes; false means no branch took it and the watcher delivers to main
+// exactly as it did before the branch existed. Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
@@ -229,7 +230,8 @@ export interface BranchDispatchOffer {
   eligible: boolean;
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
-  accept(): void;
+  settlement: Promise<void>;
+  accept(settlement?: Promise<void>): void;
 }
 
 export function createBranchDispatchOffer(
@@ -244,8 +246,10 @@ export function createBranchDispatchOffer(
     heartbeat,
     eligible,
     accepted: false,
-    accept() {
+    settlement: Promise.resolve(),
+    accept(settlement = Promise.resolve()) {
       offer.accepted = true;
+      offer.settlement = settlement;
     },
   };
   return offer;

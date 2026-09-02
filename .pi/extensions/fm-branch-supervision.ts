@@ -1149,9 +1149,9 @@ ${context.command}
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): void {
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
-    branchChain = branchChain
+    const delivery = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
@@ -1214,13 +1214,13 @@ ${context.command}
       })
       .catch(async (error: unknown) => {
         releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
-        try {
-          await fallbackToMain(message, error instanceof Error ? error.message : String(error));
-        } catch {}
+        await fallbackToMain(message, error instanceof Error ? error.message : String(error));
       })
       .finally(() => {
         if (recoveryProbe) finishProviderProbe(acceptedGeneration, acceptedSelectionRevision);
       });
+    branchChain = delivery.catch(() => {});
+    return delivery;
   }
 
   // A model or effort change applies to the next branch turn without waiting
@@ -1293,8 +1293,7 @@ ${context.command}
     }
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept();
-    enqueueWake(offer.message, generation, recoveryProbe);
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
   });
 
   pi.on?.("before_agent_start", (event, ctx) => {

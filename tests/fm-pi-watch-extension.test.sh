@@ -1757,6 +1757,7 @@ let oldDeliveryStarted = false;
 
 function makePi(blockDelivery = false) {
   const handlers = new Map();
+  const eventHandlers = new Map();
   let tool = null;
   const prompts = [];
   const pi = {
@@ -1769,12 +1770,19 @@ function makePi(blockDelivery = false) {
     },
     sendUserMessage: async (message) => {
       prompts.push(message);
-      if (blockDelivery) {
-        oldDeliveryStarted = true;
-        await oldDeliveryRelease;
-      }
     },
-    events: { on() {} },
+    events: {
+      on(event, handler) {
+        eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+      },
+      emit(event, data) {
+        if (blockDelivery && event === "fm-branch-supervision:dispatch") {
+          oldDeliveryStarted = true;
+          data.accept(oldDeliveryRelease);
+        }
+        for (const handler of eventHandlers.get(event) ?? []) handler(data);
+      },
+    },
   };
   return { pi, handlers, getTool: () => tool, prompts };
 }
@@ -1813,6 +1821,8 @@ async function waitFor(pred, label, attempts = 500) {
 }
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/replacement-race.meta`, "project=/projects/replacement-race\nwindow=fm-replacement-race\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\treplacement-race.status\tsignal: replacement-race actionable outcome\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const previous = makePi(true);
 mod.default(previous.pi);
@@ -1823,9 +1833,9 @@ if (!initial.details?.ok || !String(initial.details.message).includes("started P
 await waitFor(() => liveArms().length === 1, "initial live arm");
 
 writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-race actionable outcome\n");
-await waitFor(() => oldDeliveryStarted, "old-session actionable delivery");
-if (!previous.prompts[0]?.includes("signal: replacement-race actionable outcome")) {
-  throw new Error(`old session did not begin the actionable delivery: ${previous.prompts.join(" | ")}`);
+await waitFor(() => oldDeliveryStarted, "old-session accepted branch delivery");
+if (previous.prompts.length !== 0) {
+  throw new Error(`accepted old-session branch wake reached main: ${previous.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
 writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
@@ -1871,6 +1881,91 @@ EOF
   expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close"
   [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
+}
+
+test_pi_late_retiring_actionable_reaches_replacement() {
+  local repo home plugin count out status
+  repo="$TMP_ROOT/pi-late-retiring-actionable-root"
+  home="$TMP_ROOT/pi-late-retiring-actionable-home"
+  count="$TMP_ROOT/pi-late-retiring-actionable.count"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+late_close() {
+  sleep 0.15
+  printf 'signal: late retiring actionable outcome\n'
+  exit 0
+}
+trap late_close TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, getTool: () => tool, prompts };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi();
+originalMod.default(original.pi);
+const armed = await original.getTool().execute("initial-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
+await waitFor(() => existsSync(process.env.FM_ARM_COUNT) && readFileSync(process.env.FM_ARM_COUNT, "utf8").trim() === "1", "original arm");
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=late-retiring-close`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: late retiring actionable outcome")),
+  "late actionable delivery to replacement",
+);
+if (replacement.prompts.filter((message) => message.includes("signal: late retiring actionable outcome")).length !== 1) {
+  throw new Error(`replacement did not receive exactly one late outcome: ${replacement.prompts.join(" | ")}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must receive an actionable close after retirement timeout"
+  [ -z "$out" ] || fail "Pi late retiring actionable test printed output: $out"
+  pass "Pi replacement receives actionable closes after retirement timeout"
 }
 
 test_pi_replacement_persistence_failure_stops_arm_child() {
@@ -3063,6 +3158,7 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
+test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_persistence_failure_stops_arm_child
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child

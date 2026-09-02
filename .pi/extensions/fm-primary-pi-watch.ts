@@ -68,6 +68,7 @@ type WatchToolRenderContext = {
 type SessionGeneration = {
   id: number;
   stopping: boolean;
+  replacement: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
@@ -125,6 +126,12 @@ let nextGenerationId = 0;
 let nextHandoffId = 0;
 let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
+type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
+type ReplacementCoordinatorGlobal = typeof globalThis & {
+  __firstmatePiWatchReplacement?: { receiver: ReplacementActionableReceiver | null };
+};
+const replacementCoordinatorGlobal = globalThis as ReplacementCoordinatorGlobal;
+const replacementCoordinator = replacementCoordinatorGlobal.__firstmatePiWatchReplacement ??= { receiver: null };
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
@@ -250,20 +257,33 @@ function persistReplacementHandoff(pending: PendingActionableClose[]): void {
 }
 
 function loadReplacementHandoff(): PendingActionableClose[] {
-  if (replacementHandoff) return [...replacementHandoff];
   try {
     const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
     replacementHandoff = pending;
     return [...pending];
   } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return [];
+    if (nodeErrorCode(error) === "ENOENT") {
+      replacementHandoff = null;
+      return [];
+    }
     throw error;
   }
 }
 
+function mergeReplacementHandoff(pending: PendingActionableClose): void {
+  let stored: PendingActionableClose[] = [];
+  try {
+    stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+  } catch (error) {
+    if (nodeErrorCode(error) !== "ENOENT") throw error;
+  }
+  if (!stored.some((item) => item.token === pending.token)) stored.push(pending);
+  writeReplacementHandoff(stored);
+}
+
 function clearReplacementHandoff(pending: PendingActionableClose): void {
   try {
-    const stored = replacementHandoff ?? validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
     const remaining = stored.filter((item) => item.token !== pending.token);
     if (remaining.length === stored.length) return;
     if (remaining.length > 0) {
@@ -312,6 +332,7 @@ function createGeneration(): SessionGeneration {
   return {
     id: ++nextGenerationId,
     stopping: false,
+    replacement: false,
     child: null,
     retryTimer: null,
     retryFailures: 0,
@@ -353,6 +374,7 @@ async function waitForGenerationChildClose(armChild: ChildProcess | null): Promi
 }
 
 async function stopSessionGeneration(generation: SessionGeneration, replacement: boolean): Promise<void> {
+  generation.replacement = replacement;
   let persistedTokens = "";
   try {
     if (replacement && generation.pendingActionables.length > 0) {
@@ -448,7 +470,7 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  function offerWakeToBranch(message: string): boolean {
+  function offerWakeToBranch(message: string): Promise<void> | null {
     const heartbeat = /^heartbeat($|:)/.test(message);
     // A check-kind close (merge-confirmation polls, Relay mentions,
     // credential/auth failures, and every other legitimately main-only
@@ -464,7 +486,7 @@ export default function (pi: ExtensionAPI) {
     const eligible = !isCheckTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
-    return offer.accepted;
+    return offer.accepted ? offer.settlement : null;
   }
 
   async function deliverActionableWake(
@@ -485,7 +507,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
     }
-    if (!repairFailed && offerWakeToBranch(message)) return;
+    if (!repairFailed) {
+      const branchDelivery = offerWakeToBranch(message);
+      if (branchDelivery) {
+        await branchDelivery;
+        return;
+      }
+    }
     await sendWake(owner, message);
   }
 
@@ -499,8 +527,11 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     pending: PendingActionableClose,
   ): void {
-    if (!owner.pendingActionables.some((item) => item.token === pending.token)) {
-      owner.pendingActionables.push(pending);
+    if (owner.pendingActionables.some((item) => item.token === pending.token)) return;
+    owner.pendingActionables.push(pending);
+    if (owner.stopping && owner.replacement) {
+      mergeReplacementHandoff(pending);
+      replacementCoordinator.receiver?.(pending);
     }
   }
 
@@ -530,6 +561,12 @@ export default function (pi: ExtensionAPI) {
       if (generationIsLive(owner)) owner.restoring = false;
     }
   }
+
+  const receiveReplacementActionable: ReplacementActionableReceiver = (pending) => {
+    if (!generationIsLive(generation)) return;
+    enqueuePendingActionable(generation, pending);
+    void processPendingActionables(generation);
+  };
 
   function retryDelay(attempt: number): number {
     return Math.min(retryMaxMs, retryBaseMs * 2 ** Math.max(0, attempt - 1));
@@ -745,6 +782,7 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
+    replacementCoordinator.receiver = receiveReplacementActionable;
     markLoaded();
     if (lockOwnership() !== "owned") return;
     let pending: PendingActionableClose[] = [];
@@ -765,6 +803,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("session_shutdown", async (event) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
+    if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   });
 
