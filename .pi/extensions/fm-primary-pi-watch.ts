@@ -127,16 +127,25 @@ let nextHandoffId = 0;
 let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
 type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
+type ActionableDeliveryClaim = {
+  owner: SessionGeneration;
+  settlement: Promise<"delivered" | "failed">;
+};
+type ReplacementCoordinator = {
+  receiver: ReplacementActionableReceiver | null;
+  pending: PendingActionableClose[];
+  nextTokenId: number;
+  deliveries: Map<string, ActionableDeliveryClaim>;
+};
 type ReplacementCoordinatorGlobal = typeof globalThis & {
-  __firstmatePiWatchReplacement?: {
-    receiver: ReplacementActionableReceiver | null;
-    pending: PendingActionableClose[];
-  };
+  __firstmatePiWatchReplacement?: ReplacementCoordinator;
 };
 const replacementCoordinatorGlobal = globalThis as ReplacementCoordinatorGlobal;
 const replacementCoordinator = replacementCoordinatorGlobal.__firstmatePiWatchReplacement ??= {
   receiver: null,
   pending: [],
+  nextTokenId: 0,
+  deliveries: new Map(),
 };
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
@@ -201,7 +210,7 @@ function nodeErrorCode(error: unknown): string {
 function createPendingActionable(message: string, predecessorArmPid: string): PendingActionableClose {
   return {
     version: 1,
-    token: `${process.pid}-${Date.now()}-${++nextHandoffId}`,
+    token: `${process.pid}-${Date.now()}-${++replacementCoordinator.nextTokenId}`,
     message,
     predecessorArmPid,
   };
@@ -566,12 +575,38 @@ export default function (pi: ExtensionAPI) {
     try {
       while (generationIsLive(owner) && owner.pendingActionables.length > 0) {
         const pending = owner.pendingActionables[0];
-        const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
-        if (!generationIsLive(owner)) return;
-        const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-        await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-        if (!generationIsLive(owner)) return;
-        finishPendingActionable(owner, pending);
+        const existingClaim = replacementCoordinator.deliveries.get(pending.token);
+        if (existingClaim && existingClaim.owner !== owner) {
+          const settlement = await existingClaim.settlement;
+          if (!generationIsLive(owner)) return;
+          if (settlement === "delivered") {
+            finishPendingActionable(owner, pending);
+            continue;
+          }
+          if (replacementCoordinator.deliveries.get(pending.token) === existingClaim) {
+            replacementCoordinator.deliveries.delete(pending.token);
+          }
+        }
+        let settleClaim: (settlement: "delivered" | "failed") => void = () => {};
+        const settlement = new Promise<"delivered" | "failed">((resolveSettlement) => {
+          settleClaim = resolveSettlement;
+        });
+        replacementCoordinator.deliveries.set(pending.token, { owner, settlement });
+        try {
+          const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
+          if (!generationIsLive(owner)) {
+            settleClaim("failed");
+            return;
+          }
+          const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
+          await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+          settleClaim("delivered");
+          finishPendingActionable(owner, pending);
+          if (!generationIsLive(owner)) return;
+        } catch (error) {
+          settleClaim("failed");
+          throw error;
+        }
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -804,24 +839,25 @@ export default function (pi: ExtensionAPI) {
     markLoaded();
     if (lockOwnership() !== "owned") return;
     replacementCoordinator.receiver = receiveReplacementActionable;
-    const inProcessPending = replacementCoordinator.pending.splice(0);
     let pending: PendingActionableClose[] = [];
+    let loadFailure = "";
     try {
       pending = loadReplacementHandoff();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      const result = startArm(generation);
-      surfaceFailure(generation, `watcher: FAILED - Pi extension could not load a replacement-session actionable wake\n${detail}\n${result.message}`);
-      return;
+      loadFailure = `watcher: FAILED - Pi extension could not load a replacement-session actionable wake\n${detail}`;
     }
+    const inProcessPending = replacementCoordinator.pending.splice(0);
     for (const actionable of [...pending, ...inProcessPending]) {
       enqueuePendingActionable(generation, actionable);
     }
     if (generation.pendingActionables.length > 0) {
+      if (loadFailure) surfaceFailure(generation, loadFailure);
       await processPendingActionables(generation);
       return;
     }
-    startArm(generation);
+    const result = startArm(generation);
+    if (loadFailure) surfaceFailure(generation, `${loadFailure}\n${result.message}`);
   });
   pi.on?.("session_shutdown", async (event) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";

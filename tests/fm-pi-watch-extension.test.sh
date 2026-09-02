@@ -1847,20 +1847,26 @@ await waitFor(() => liveArms().length === 0, "retired old-session successor");
 const replacement = makePi(false);
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=durable-handoff`);
 replacementMod.default(replacement.pi);
-await replacement.handlers.get("session_start")?.({
+const replacementStart = replacement.handlers.get("session_start")?.({
   type: "session_start",
   reason: "new",
   previousSessionFile: "/tmp/previous.jsonl",
 }, {});
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`replacement raced the accepted old-session delivery: ${replacement.prompts.join(" | ")}`);
+}
+releaseOldDelivery();
+await replacementStart;
 await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome")) &&
-    replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
-  "replacement-session actionable deliveries",
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
+  "replacement-session successor actionable delivery",
 );
-for (const outcome of ["replacement-race actionable outcome", "replacement-successor actionable outcome"]) {
-  if (replacement.prompts.filter((message) => message.includes(`signal: ${outcome}`)).length !== 1) {
-    throw new Error(`replacement session did not receive exactly one carried ${outcome}: ${replacement.prompts.join(" | ")}`);
-  }
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`settled old-session delivery was duplicated: ${replacement.prompts.join(" | ")}`);
+}
+if (replacement.prompts.filter((message) => message.includes("signal: replacement-successor actionable outcome")).length !== 1) {
+  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${replacement.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
 const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
@@ -1868,7 +1874,6 @@ if (!redundant.details?.ok || !String(redundant.details.message).includes("uncha
   throw new Error(`replacement did not retain automatic arm ownership: ${JSON.stringify(redundant.details)}`);
 }
 
-releaseOldDelivery();
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (liveArms().length !== 1) {
   throw new Error(`old delivery completion disturbed replacement ownership: ${JSON.stringify(liveArms())}`);
@@ -1947,12 +1952,13 @@ const armed = await original.getTool().execute("initial-arm", {}, undefined, und
 if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
 await waitFor(() => existsSync(process.env.FM_ARM_COUNT) && readFileSync(process.env.FM_ARM_COUNT, "utf8").trim() === "1", "original arm");
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block late handoff publication\n");
+await new Promise((resolve) => setTimeout(resolve, 250));
 
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=late-retiring-close`);
 const replacement = makePi();
 replacementMod.default(replacement.pi);
 await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block late handoff publication\n");
 await waitFor(
   () => replacement.prompts.some((message) => message.includes("signal: late retiring actionable outcome")),
   "late actionable delivery to replacement",
@@ -1971,6 +1977,94 @@ EOF
   expect_code 0 "$status" "Pi replacement must receive an actionable close after retirement timeout"
   [ -z "$out" ] || fail "Pi late retiring actionable test printed output: $out"
   pass "Pi replacement receives actionable closes after retirement timeout"
+}
+
+test_pi_replacement_tokens_are_process_unique() {
+  local repo home plugin count out status
+  repo="$TMP_ROOT/pi-replacement-token-uniqueness-root"
+  home="$TMP_ROOT/pi-replacement-token-uniqueness-home"
+  count="$TMP_ROOT/pi-replacement-token-uniqueness.count"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+late_close() {
+  sleep 0.08
+  printf 'signal: module-%s late actionable outcome\n' "$count"
+  exit 0
+}
+trap late_close TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+Date.now = () => 1700000000000;
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async () => {},
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, getTool: () => tool };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+for (let moduleIndex = 1; moduleIndex <= 2; moduleIndex += 1) {
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?token-module=${moduleIndex}`);
+  const instance = makePi();
+  mod.default(instance.pi);
+  const armed = await instance.getTool().execute(`arm-${moduleIndex}`, {}, undefined, undefined, {});
+  if (!armed.details?.ok) throw new Error(`module ${moduleIndex} arm failed: ${JSON.stringify(armed.details)}`);
+  await waitFor(
+    () => existsSync(process.env.FM_ARM_COUNT) && Number(readFileSync(process.env.FM_ARM_COUNT, "utf8").trim()) >= moduleIndex,
+    `module ${moduleIndex} arm`,
+  );
+  await instance.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+}
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+await waitFor(() => existsSync(handoffPath), "replacement handoff");
+await waitFor(() => JSON.parse(readFileSync(handoffPath, "utf8")).pending.length === 2, "two distinct handoff outcomes");
+const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
+if (new Set(handoff.pending.map((item) => item.token)).size !== 2) {
+  throw new Error(`fresh modules reused a replacement token: ${JSON.stringify(handoff)}`);
+}
+for (const moduleIndex of [1, 2]) {
+  if (!handoff.pending.some((item) => item.message.includes(`signal: module-${moduleIndex} late actionable outcome`))) {
+    throw new Error(`module ${moduleIndex} outcome was dropped: ${JSON.stringify(handoff)}`);
+  }
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement handoff tokens must stay unique across fresh modules"
+  [ -z "$out" ] || fail "Pi replacement token uniqueness test printed output: $out"
+  pass "Pi replacement handoff tokens stay unique across fresh modules"
 }
 
 test_pi_replacement_persistence_failure_stops_arm_child() {
@@ -3164,6 +3258,7 @@ test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_late_retiring_actionable_reaches_replacement
+test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_stops_arm_child
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
