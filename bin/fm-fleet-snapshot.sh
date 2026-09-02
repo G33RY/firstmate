@@ -179,7 +179,7 @@ usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
-JSON is the stable machine-readable output contract. The default ledger mode
+JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
 
 --secondmate-home-summary emits the bounded structured summary used after a
