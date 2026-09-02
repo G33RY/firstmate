@@ -926,6 +926,35 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  function activateOwnedWatch(owner: SessionGeneration): ArmResult {
+    if (lockOwnership() !== "owned") return startArm(owner);
+    replacementCoordinator.receiver = receiveReplacementActionable;
+    let pending: PendingActionableClose[] = [];
+    let loadFailure = "";
+    try {
+      pending = loadReplacementHandoff();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      loadFailure = `watcher: FAILED - Pi extension could not load a replacement-session actionable wake\n${detail}`;
+    }
+    const inProcessPending = replacementCoordinator.pending.splice(0);
+    for (const actionable of [...pending, ...inProcessPending]) {
+      enqueuePendingActionable(owner, actionable);
+    }
+    if (owner.pendingActionables.length > 0) {
+      if (loadFailure) surfaceFailure(owner, loadFailure);
+      const armResult = startArm(owner, owner.pendingActionables[0].predecessorArmPid);
+      if (!armResult.ok) {
+        surfaceFailure(owner, `watcher: FAILED - Pi extension could not arm before replacement wake delivery\n${armResult.message}`);
+      }
+      void processPendingActionables(owner);
+      return armResult;
+    }
+    const result = startArm(owner);
+    if (loadFailure) surfaceFailure(owner, `${loadFailure}\n${result.message}`);
+    return result;
+  }
+
   pi.on?.("before_agent_start", (event) => {
     for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
       if (acknowledgement.content !== event.prompt) continue;
@@ -940,30 +969,7 @@ export default function (pi: ExtensionAPI) {
     activateGeneration(generation);
     markLoaded();
     if (lockOwnership() !== "owned") return;
-    replacementCoordinator.receiver = receiveReplacementActionable;
-    let pending: PendingActionableClose[] = [];
-    let loadFailure = "";
-    try {
-      pending = loadReplacementHandoff();
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      loadFailure = `watcher: FAILED - Pi extension could not load a replacement-session actionable wake\n${detail}`;
-    }
-    const inProcessPending = replacementCoordinator.pending.splice(0);
-    for (const actionable of [...pending, ...inProcessPending]) {
-      enqueuePendingActionable(generation, actionable);
-    }
-    if (generation.pendingActionables.length > 0) {
-      if (loadFailure) surfaceFailure(generation, loadFailure);
-      const armResult = startArm(generation, generation.pendingActionables[0].predecessorArmPid);
-      if (!armResult.ok) {
-        surfaceFailure(generation, `watcher: FAILED - Pi extension could not arm before replacement wake delivery\n${armResult.message}`);
-      }
-      void processPendingActionables(generation);
-      return;
-    }
-    const result = startArm(generation);
-    if (loadFailure) surfaceFailure(generation, `${loadFailure}\n${result.message}`);
+    activateOwnedWatch(generation);
   });
   pi.on?.("session_shutdown", async (event) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
@@ -976,7 +982,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      const result = startArm(generation);
+      const result = activateOwnedWatch(generation);
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -1017,7 +1023,7 @@ export default function (pi: ExtensionAPI) {
       return new Container();
     },
     execute: async () => {
-      const result = startArm(generation);
+      const result = activateOwnedWatch(generation);
       return {
         content: [{ type: "text", text: result.message }],
         details: result,

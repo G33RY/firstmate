@@ -1933,18 +1933,21 @@ import { pathToFileURL } from "node:url";
 function makePi() {
   const handlers = new Map();
   const prompts = [];
+  let tool = null;
   const pi = {
     on(event, handler) {
       handlers.set(event, handler);
     },
     registerCommand() {},
-    registerTool() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
     sendUserMessage: async (message) => {
       prompts.push(message);
     },
     events: { on() {}, emit() {} },
   };
-  return { pi, handlers, prompts };
+  return { pi, handlers, prompts, getTool: () => tool };
 }
 
 async function waitFor(pred, label) {
@@ -1984,7 +1987,13 @@ await replacement.handlers.get("session_shutdown")?.({ type: "session_shutdown",
 const finalMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=idle-followup`);
 const finalSession = makePi();
 finalMod.default(finalSession.pi);
+const { unlinkSync } = await import("node:fs");
+unlinkSync(`${process.env.FM_HOME}/state/.lock`);
 await finalSession.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+if (finalSession.prompts.length !== 0) throw new Error("lockless replacement adopted its handoff early");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const reclaimed = await finalSession.getTool().execute("reclaimed-arm", {}, undefined, undefined, {});
+if (!reclaimed.details?.ok) throw new Error(`reclaimed arm failed: ${JSON.stringify(reclaimed.details)}`);
 await waitFor(
   () => finalSession.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
   "second replacement replay before idle consumption",
