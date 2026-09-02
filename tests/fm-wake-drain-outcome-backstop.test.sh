@@ -266,21 +266,18 @@ test_outcome_index_recovery_is_fail_closed_and_migratable() {
   pass "authoritative outcome rows recover interrupted bounded indexes"
 }
 
-test_overbound_latest_event_emits_bounded_task_pointer() {
-  local dir state out longest
-  dir=$(make_case overbound-latest-event)
+test_overbound_routine_event_stays_silent() {
+  local dir state out
+  dir=$(make_case overbound-routine-event)
   state="$dir/state"
   out="$dir/drain.out"
 
-  perl -e 'print "done: ", "x" x 70000, "\n"' > "$state/oversized.status"
+  perl -e 'print "working: ", "x" x 70000, "\n"' > "$state/oversized.status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
-    || fail "main drain failed for an over-bound latest event"
-  grep -F 'oversized latest status event exceeds the 65536-byte backstop inspection bound; inspect oversized.status' "$out" >/dev/null \
-    || fail "over-bound latest event produced no bounded task pointer: $(cat "$out")"
-  longest=$(awk '{ if (length > max) max=length } END { print max + 0 }' "$out")
-  [ "$longest" -le 219 ] \
-    || fail "over-bound latest-event diagnostic exceeded the item cap: $longest"
-  pass "an over-bound latest event emits a bounded task diagnostic"
+    || fail "main drain failed for an over-bound routine event"
+  [ ! -s "$out" ] \
+    || fail "unclassifiable over-bound routine event was presented: $(cat "$out")"
+  pass "an over-bound unclassifiable routine event stays silent"
 }
 
 test_backstop_output_is_bounded() {
@@ -317,5 +314,5 @@ test_drain_does_not_scan_append_only_outcome_history
 test_successful_backstop_is_idempotent_without_consuming_delayed_annotation
 test_rejected_decision_line_surfaces_once_through_backstop
 test_outcome_index_recovery_is_fail_closed_and_migratable
-test_overbound_latest_event_emits_bounded_task_pointer
+test_overbound_routine_event_stays_silent
 test_backstop_output_is_bounded
