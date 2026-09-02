@@ -498,12 +498,12 @@ reject_event() {
 # reconciliation below sees it. The route transport only runs main -> secondmate,
 # so this is a pull; a worker on the other machine has no path back here.
 #
-# Returns 0 when every remote-bound loop was reached (including when nothing was
-# staged), and 1 when at least one was not. A route that could not be reached is
-# reported by name and never passed off as an empty inbox: the promise is still
-# owed, and the staged result is still on that host.
+# The current registry record is the route drained. A reassignment between
+# staging and collection is surfaced as unreached when that route is empty; the
+# staged result stays on the original host for reconciliation.
 collect_remote_staged_events() {
   local dir file id work_home work_home_path sid route_kind rc=0 collect_rc payload line event_id dropped
+  local obligation_payload delivery events_dir local_file local_obligation inbox_has_event
   dir=$(fm_pf_registry_dir "$STATE")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   for file in "$dir"/*; do
@@ -539,6 +539,28 @@ collect_remote_staged_events() {
       printf 'unreached %s: the work home %s refused the collection (exit %s), so its terminal result stays retained there for reconciliation\n' \
         "$id" "$sid" "$collect_rc"
       rc=1
+      continue
+    fi
+    if [ -z "$payload" ]; then
+      obligation_payload=$(obligation_json "$id" 2>/dev/null) || obligation_payload=
+      delivery=$(pf_field "$obligation_payload" '.public_followup.delivery.state')
+      inbox_has_event=0
+      events_dir=$(fm_pf_events_dir "$STATE")
+      if [ -d "$events_dir" ] && [ ! -L "$events_dir" ]; then
+        for local_file in "$events_dir"/*.json; do
+          [ -f "$local_file" ] && [ ! -L "$local_file" ] || continue
+          local_obligation=$(jq -r '.obligation_id // empty' "$local_file" 2>/dev/null) || local_obligation=
+          if [ "$local_obligation" = "$id" ]; then
+            inbox_has_event=1
+            break
+          fi
+        done
+      fi
+      if [ "$delivery" = pending-work ] && [ "$inbox_has_event" -eq 0 ]; then
+        printf 'unreached %s: the current work home %s returned no staged terminal result; after a route reassignment its terminal result stays retained there for reconciliation\n' \
+          "$id" "$sid"
+        rc=1
+      fi
       continue
     fi
 

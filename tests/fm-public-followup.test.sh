@@ -2906,6 +2906,44 @@ test_remote_route_loss_fails_brief_and_collection() {
   pass "route loss fails brief and consume without dropping the staged result"
 }
 
+test_remote_route_reassignment_fails_collection_loudly() {
+  local home original replacement out command
+  remote_fixture_prepare
+  home=$(make_home remote-route-reassigned-emit)
+  original=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-route-reassigned req-route-reassigned secondmate:mini-default work-reassigned
+
+  out=$(run_pf "$home" brief pf-route-reassigned) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  command=${command//<value>/data/work-reassigned/report.md}
+  command=${command//<one bounded public-safe sentence>/The original remote route finished its work.}
+  printf 'mini-default\n' > "$original/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the original route must stage its terminal result"
+
+  replacement="$TMP_ROOT/remote-route-reassigned-replacement"
+  mkdir -p "$replacement/state" "$replacement/data"
+  replacement=$(cd "$replacement" && pwd -P)
+  cat > "$home/data/secondmates.md" <<EOF
+- mini-default - replacement lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $replacement; scope: relay work; projects: firstmate; added 2026-08-03)
+EOF
+  fm_write_meta "$home/state/mini-default.meta" "kind=secondmate" "home=$replacement" \
+    "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
+
+  expect_failure "consume must refuse an empty reassigned route" \
+    run_pf_remote "$home" consume
+  assert_contains "$EXPECT_OUT" "unreached pf-route-reassigned" \
+    "consume must name the stranded obligation as unreached"
+  assert_contains "$EXPECT_OUT" "mini-default" \
+    "consume must name the reassigned route"
+  assert_contains "$EXPECT_OUT" "stays retained there" \
+    "consume must report that the original staged result remains reconcilable"
+  [ -n "$(ls -A "$original/state/public-followup/outbox" 2>/dev/null)" ] \
+    || fail "the original route must retain its staged terminal result"
+  [ "$(delivery_state "$home" pf-route-reassigned)" = pending-work ] \
+    || fail "route reassignment must leave the promise open"
+  pass "route reassignment fails collection without losing the staged result"
+}
+
 test_remote_brief_rejects_traversal_route_paths() {
   local home remote
   remote_fixture_prepare
@@ -3031,6 +3069,7 @@ test_remote_work_home_emit_reaches_owning_home
 test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
 test_remote_route_loss_fails_brief_and_collection
+test_remote_route_reassignment_fails_collection_loudly
 test_remote_brief_rejects_traversal_route_paths
 test_local_work_home_emit_path_is_unchanged
 test_remote_collection_is_idempotent
