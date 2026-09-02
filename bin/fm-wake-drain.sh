@@ -245,7 +245,7 @@ EOF
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident event event_endpoint line verb key note receipt store lock ready ready_seq
+  local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready ready_seq
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
@@ -289,10 +289,12 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     case "$verb" in
       needs-decision|blocked)
         key=$(_fm_decision_key "$event") || key=
-        note=$(status_line_note "$event")
-        if [ -n "$key" ] && _fm_decision_key_transition_allowed "$key" "$note"; then
-          continue
-        fi
+        # Parseable decisions belong exclusively to the durable fold. That
+        # includes reserved-key transitions the fold rejects; resurfacing one
+        # here would let a foreign writer bypass the namespace guard. A line
+        # with malformed key syntax has no fold representation, so the
+        # captain-facing backstop remains its only safe presentation path.
+        [ -z "$key" ] || continue
         ;;
     esac
     load_branch_outcome_index "$task"
@@ -494,15 +496,31 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
-  print_unread_status_section "$snapshot" || return 1
-  print_status_outcome_backstop_section "$snapshot" || return 1
-  print_open_decisions_section "$snapshot" || return 1
-  print_record_divergence_section || return 1
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
+  if ! {
+    print_unread_status_section "$snapshot" \
+      && print_status_outcome_backstop_section "$snapshot" \
+      && print_open_decisions_section "$snapshot" \
+      && print_record_divergence_section
+  } > "$prepared"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  # Prepare every section before committing any receipt. Commit before writing
+  # the prepared presentation so a later fold/manifest failure cannot leave a
+  # displayed one-shot backstop unacknowledged and repeat it on the next drain.
+  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  command cat "$prepared"
+  local rc=$?
+  rm -f -- "$prepared"
+  return "$rc"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]

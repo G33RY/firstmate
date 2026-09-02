@@ -214,6 +214,42 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation() {
   pass "backstop receipts prevent repeats without consuming delayed signal annotations"
 }
 
+test_receipt_commit_failure_does_not_present_an_unacknowledged_backstop() {
+  local dir state fakebin out retry_out final_out real_mv
+  dir=$(make_case receipt-commit-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/failed.out"
+  retry_out="$dir/retry.out"
+  final_out="$dir/final.out"
+  real_mv=$(command -v mv)
+  mkdir -p "$fakebin"
+
+  printf 'done: must not print before its receipt is durable\n' > "$state/atomic-task.status"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do last=\$arg; done
+if [ "\${last:-}" = "$state/.status-presentation-cursor" ]; then exit 1; fi
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the top-level empty-queue drain changed its compatibility exit on a receipt failure"
+  [ ! -s "$out" ] \
+    || fail "the backstop printed before its receipt commit succeeded: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry_out" \
+    || fail "backstop retry failed after receipt storage recovered"
+  grep -F 'atomic-task done: must not print before its receipt is durable' "$retry_out" >/dev/null \
+    || fail "the uncommitted backstop did not retry after storage recovered: $(cat "$retry_out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$final_out" \
+    || fail "post-recovery idempotence drain failed"
+  [ ! -s "$final_out" ] \
+    || fail "the successfully committed retry repeated: $(cat "$final_out")"
+  pass "a backstop is presented only after its one-shot receipt commits"
+}
+
 test_rejected_decision_line_surfaces_once_through_backstop() {
   local dir state first_out second_out
   dir=$(make_case rejected-decision)
@@ -312,6 +348,7 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop
 test_same_second_outcome_uses_status_causal_position
 test_drain_does_not_scan_append_only_outcome_history
 test_successful_backstop_is_idempotent_without_consuming_delayed_annotation
+test_receipt_commit_failure_does_not_present_an_unacknowledged_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
 test_outcome_index_recovery_is_fail_closed_and_migratable
 test_overbound_routine_event_stays_silent
