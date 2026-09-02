@@ -1677,19 +1677,20 @@ const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
 fire("session_start", {});
-if (!dispatch("signal: unacknowledged branch wake").accepted) {
-  throw new Error("eligible wake was not accepted");
-}
+const offer = dispatch("signal: unacknowledged branch wake");
+if (!offer.accepted) throw new Error("eligible wake was not accepted");
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if ((globalThis.__fmPrompts ?? []).length !== 1) throw new Error("branch prompt did not settle");
-for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
+const failure = await offer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (!(failure instanceof Error) || !failure.message.includes("produced no durable outcome")) {
+  throw new Error(`settled prompt did not reject delivery ownership: ${String(failure)}`);
 }
-if (mainUserMessages.length !== 1 || !mainUserMessages[0].content.includes("produced no durable outcome")) {
-  throw new Error(`settled prompt without a report did not fall back to main: ${JSON.stringify(mainUserMessages)}`);
-}
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 for (let i = 0; i < 250 && existsSync(`${home}/state/.branch-eligible-rows`); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -1789,32 +1790,40 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
 
 const first = dispatch("signal: c1 provider error");
 if (!first.accepted) throw new Error("first provider-error wake was not accepted after branch construction");
-await settle(() => mainUserMessages.length === 1, "first provider-error fallback");
-if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: c1 provider error") ||
-    !mainUserMessages[0].content.includes("provider failed after construction") ||
-    !mainUserMessages[0].content.includes("429: Monthly usage limit reached")) {
-  throw new Error(`provider-error fallback did not detect the normally settled error turn: ${mainUserMessages[0].content}`);
+const firstFailure = await first.settlement.then(() => null, (error) => error);
+if (!(firstFailure instanceof Error) ||
+    !firstFailure.message.includes("provider failed after construction") ||
+    !firstFailure.message.includes("429: Monthly usage limit reached")) {
+  throw new Error(`provider-error settlement lost the settled error turn: ${String(firstFailure)}`);
 }
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("provider-error fallback left the claimed row grant active");
 }
 
 const healthy = dispatch("signal: healthy branch turn");
 if (!healthy.accepted) throw new Error("one provider error latched the branch prematurely");
+await healthy.settlement;
 await settle(() => attempt === 2 && sentToMain.length === 1, "healthy branch report");
-if (mainUserMessages.length !== 1) throw new Error("a healthy reported turn fell back to main");
+if (mainUserMessages.length !== 0) throw new Error("a healthy reported turn fell back to main");
 
 const third = dispatch("signal: provider error after reset");
 if (!third.accepted) throw new Error("a successful report did not reset the consecutive provider-error streak");
-await settle(() => mainUserMessages.length === 2, "provider-error fallback after reset");
+const thirdFailure = await third.settlement.then(() => null, (error) => error);
+if (!(thirdFailure instanceof Error) || !thirdFailure.message.includes("provider failed after construction")) {
+  throw new Error(`provider error after reset did not reject settlement: ${String(thirdFailure)}`);
+}
 const fourth = dispatch("signal: consecutive provider error");
 if (!fourth.accepted) throw new Error("the branch latched before the second consecutive provider error settled");
-await settle(() => mainUserMessages.length === 3, "second consecutive provider-error fallback");
+const fourthFailure = await fourth.settlement.then(() => null, (error) => error);
+if (!(fourthFailure instanceof Error) || !fourthFailure.message.includes("provider failed after construction")) {
+  throw new Error(`consecutive provider error did not reject settlement: ${String(fourthFailure)}`);
+}
 
 const fifth = dispatch("signal: branch must now defer directly to main");
 if (fifth.accepted) throw new Error("two consecutive provider errors did not latch the broken branch");
 await new Promise((resolve) => setTimeout(resolve, 50));
-if (attempt !== 4 || mainUserMessages.length !== 3) {
+if (attempt !== 4 || mainUserMessages.length !== 0) {
   throw new Error(`latched branch still prompted or emitted its own fallback: attempts=${attempt} fallbacks=${mainUserMessages.length}`);
 }
 const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated provider errors"));
@@ -1927,21 +1936,27 @@ if (!stale.accepted) throw new Error("in-flight wake was not accepted");
 await settle(() => globalThis.__fmMirrorStarted === true, "pending branch mirror");
 fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
 releaseMirror();
-await settle(() => mainUserMessages.length === 1, "stale provider-error fallback");
-if (!mainUserMessages[0].content.includes("provider failed after construction") ||
-    mainUserMessages[0].content.includes("no durable transcript")) {
-  throw new Error(`selection change detached the in-flight transcript: ${mainUserMessages[0].content}`);
+const staleFailure = await stale.settlement.then(() => null, (error) => error);
+if (!(staleFailure instanceof Error) ||
+    !staleFailure.message.includes("provider failed after construction") ||
+    staleFailure.message.includes("no durable transcript")) {
+  throw new Error(`selection change detached the in-flight transcript: ${String(staleFailure)}`);
 }
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 
 globalThis.__fmMirrorGate = null;
 const replacementError = dispatch("signal: first replacement provider error");
 if (!replacementError.accepted) throw new Error("replacement branch was unavailable after selection");
-await settle(() => mainUserMessages.length === 2, "replacement provider-error fallback");
+const replacementFailure = await replacementError.settlement.then(() => null, (error) => error);
+if (!(replacementFailure instanceof Error) || !replacementFailure.message.includes("provider failed after construction")) {
+  throw new Error(`replacement provider error did not reject settlement: ${String(replacementFailure)}`);
+}
 
 const healthy = dispatch("signal: replacement branch recovery");
 if (!healthy.accepted) throw new Error("stale provider error polluted the replacement failure streak");
+await healthy.settlement;
 await settle(() => attempt === 3, "replacement branch recovery");
-if (mainUserMessages.length !== 2) throw new Error("healthy replacement turn fell back to main");
+if (mainUserMessages.length !== 0) throw new Error("healthy replacement turn fell back to main");
 process.exit(0);
 EOF
   status=$?

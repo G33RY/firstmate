@@ -210,6 +210,11 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
+function completedActionableLine(output: string): string {
+  const newline = output.lastIndexOf("\n");
+  return newline < 0 ? "" : actionableLine(output.slice(0, newline + 1));
+}
+
 function nodeErrorCode(error: unknown): string {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code ?? "")
@@ -878,7 +883,7 @@ export default function (pi: ExtensionAPI) {
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
         settleReadiness(true);
       }
-      const reason = actionableLine(combined);
+      const reason = completedActionableLine(stdout) || completedActionableLine(stderr);
       if (reason && !armPendingActionable.has(armChild)) {
         const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
         armPendingActionable.set(armChild, pending);

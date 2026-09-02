@@ -1741,7 +1741,9 @@ while :; do
   if [ -e "$FM_TRIGGER_FILE" ]; then
     outcome=$(cat "$FM_TRIGGER_FILE")
     rm -f "$FM_TRIGGER_FILE"
-    printf 'signal: %s\n' "$outcome"
+    printf 'signal: '
+    sleep 0.02
+    printf '%s\n' "$outcome"
     exit 0
   fi
   [ ! -e "$FM_STOP_FILE" ] || exit 0
