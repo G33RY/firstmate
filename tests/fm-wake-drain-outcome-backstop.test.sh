@@ -186,6 +186,86 @@ test_drain_does_not_scan_append_only_outcome_history() {
   pass "drain cost and suppression are independent of append-only outcome history"
 }
 
+test_successful_backstop_is_idempotent_without_consuming_delayed_annotation() {
+  local dir state first_out second_out signal_out
+  dir=$(make_case idempotent-receipt)
+  state="$dir/state"
+  first_out="$dir/first.out"
+  second_out="$dir/second.out"
+  signal_out="$dir/signal.out"
+
+  printf 'done: keyless completion awaiting recovery\n' > "$state/receipt-task.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first_out" \
+    || fail "first keyless backstop drain failed"
+  grep -F 'receipt-task done: keyless completion awaiting recovery' "$first_out" >/dev/null \
+    || fail "first drain did not surface the keyless completion: $(cat "$first_out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second_out" \
+    || fail "second keyless backstop drain failed"
+  [ ! -s "$second_out" ] \
+    || fail "a successful backstop presentation repeated unchanged: $(cat "$second_out")"
+
+  append_wake "$state" signal receipt-task.status 'signal: receipt-task.status' \
+    || fail "could not publish the delayed signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$signal_out" 2>/dev/null \
+    || fail "delayed-signal drain failed"
+  grep -F 'latest wake-EVENT observed at drain, not current state: receipt-task.status: done: keyless completion awaiting recovery' "$signal_out" >/dev/null \
+    || fail "the backstop receipt consumed the delayed signal annotation: $(cat "$signal_out")"
+  pass "backstop receipts prevent repeats without consuming delayed signal annotations"
+}
+
+test_rejected_decision_line_surfaces_once_through_backstop() {
+  local dir state first_out second_out
+  dir=$(make_case rejected-decision)
+  state="$dir/state"
+  first_out="$dir/first.out"
+  second_out="$dir/second.out"
+
+  printf 'blocked [key=bad/value]: credential missing\n' > "$state/rejected.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first_out" \
+    || fail "rejected-decision drain failed"
+  grep -F 'rejected blocked [key=bad/value]: credential missing' "$first_out" >/dev/null \
+    || fail "captain-facing rejected decision was lost: $(cat "$first_out")"
+  if grep -F 'OPEN DECISIONS' "$first_out" >/dev/null; then
+    fail "malformed decision key entered the open-decision fold: $(cat "$first_out")"
+  fi
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second_out" \
+    || fail "second rejected-decision drain failed"
+  [ ! -s "$second_out" ] \
+    || fail "rejected decision backstop repeated unchanged: $(cat "$second_out")"
+  pass "captain-facing decisions rejected by the fold surface once"
+}
+
+test_outcome_index_recovery_is_fail_closed_and_migratable() {
+  local dir state before after old
+  dir=$(make_case index-recovery)
+  state="$dir/state"
+  before="$dir/before.out"
+  after="$dir/after.out"
+
+  printf 'done: handled before cache interruption\n' > "$state/recovered.status"
+  old=$(( $(date +%s) - 20 ))
+  set_mtime "$old" "$state/recovered.status"
+  printf '%s\n' '{"seq":1,"epoch":'"$((old + 10))"',"task":"recovered","wake":"","verdict":"captain","summary":"legacy handled outcome"}' \
+    > "$state/branch-outcomes.jsonl"
+  printf '1\n' > "$state/.branch-outcomes-cursor"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$before" \
+    || fail "fail-closed drain failed with interrupted index publication"
+  grep -F 'bounded outcome indexes need recovery' "$before" >/dev/null \
+    || fail "missing index readiness re-presented or hid recovery state: $(cat "$before")"
+  grep -F 'recovered done:' "$before" >/dev/null \
+    && fail "interrupted index publication re-presented a handled outcome"
+
+  FM_STATE_OVERRIDE="$state" "$OUTCOMES" processed-init \
+    || fail "processed-init did not rebuild outcome indexes"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$after" \
+    || fail "drain failed after index recovery"
+  [ ! -s "$after" ] \
+    || fail "recovered index did not suppress its handled status: $(cat "$after")"
+  pass "authoritative outcome rows recover interrupted bounded indexes"
+}
+
 test_backstop_output_is_bounded() {
   local dir state out old i payload count longest
   dir=$(make_case bounded-output)
@@ -217,4 +297,7 @@ test_older_or_other_task_outcome_cannot_hide_a_new_captain_event
 test_branch_annotation_cannot_consume_the_main_resurfacing_backstop
 test_same_second_outcome_uses_status_causal_position
 test_drain_does_not_scan_append_only_outcome_history
+test_successful_backstop_is_idempotent_without_consuming_delayed_annotation
+test_rejected_decision_line_surfaces_once_through_backstop
+test_outcome_index_recovery_is_fail_closed_and_migratable
 test_backstop_output_is_bounded

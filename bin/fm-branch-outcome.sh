@@ -5,8 +5,9 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false}.
-#     Legacy rows without `silent` remain valid and are treated as visible.
+#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
+#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
+#     or status provenance remain valid and are treated as visible.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -38,11 +39,11 @@
 #     re-presented. A present marker is validated before the migration returns,
 #     and a marker ahead of the read cursor fails closed.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
-#     record for the latest outcome of that task: its outcome sequence and the
-#     identity plus byte endpoint of the task status log observed immediately
-#     before the outcome append. It is atomically replaced, never grows with
-#     outcome history, and lets wake-drain distinguish a covered status event
-#     from one appended later at the same whole-second timestamp.
+#     cache of the latest outcome's status provenance. The authoritative copy
+#     is in the append-only row. $STATE/.branch-outcome-index-ready is removed
+#     before append and published only after the cache update; processed-init
+#     rebuilds every cache before publishing it, so interruption or upgrade
+#     fails closed without making each drain scan lifetime history.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -92,6 +93,7 @@ LOCK="$STATE/.branch-outcomes.lock"
 MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
+OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init | list [--recent <n>] | startup-replay" >&2
@@ -169,6 +171,12 @@ last_seq() {
       and (
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
+        or (
+          keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and (.silent | type) == "boolean"
+          and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
+          and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+        )
       )
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
@@ -216,16 +224,61 @@ capture_status_position() { # <task>
   CAPTURED_STATUS_IDENT=$ident
 }
 
-write_outcome_index() { # <task> <seq>
-  local task=$1 seq=$2 path tmp record
+write_outcome_index() { # <task> <seq> [<endpoint> <identity>]
+  local task=$1 seq=$2 endpoint=${3:-$CAPTURED_STATUS_ENDPOINT} ident=${4:-$CAPTURED_STATUS_IDENT} path tmp record
   path=$(outcome_index_path "$task") || return 1
   record=$(printf '%s\t%s\t%s\t%s\n' "$OUTCOME_INDEX_VERSION" "$seq" \
-    "$CAPTURED_STATUS_ENDPOINT" "$CAPTURED_STATUS_IDENT") || return 1
+    "$endpoint" "$ident") || return 1
   [ "${#record}" -le "$OUTCOME_INDEX_MAX_BYTES" ] || return 1
   tmp=$(mktemp "$STATE/.branch-outcome-index.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   printf '%s\n' "$record" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
+}
+
+publish_outcome_index_ready() { # <seq>
+  local tmp
+  tmp=$(mktemp "$STATE/.branch-outcome-index-ready.XXXXXX") || return 1
+  printf '%s\n' "$1" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$OUTCOME_INDEX_READY"
+}
+
+rebuild_outcome_indexes() {
+  local rows task seq epoch endpoint ident f mtime
+  rm -f -- "$OUTCOME_INDEX_READY" || return 1
+  [ -s "$STORE" ] || { publish_outcome_index_ready 0; return; }
+  rows=$(jq -r -s '
+    map(select(.task != "fleet"))
+    | group_by(.task)
+    | map(.[-1])[]
+    | [.task, (.seq | tostring), (.epoch | tostring),
+       ((.statusEndpoint // "") | tostring), (.statusIdent // "")]
+    | @tsv
+  ' "$STORE") || return 1
+  while IFS=$(printf '\t') read -r task seq epoch endpoint ident; do
+    [ -n "$task" ] || continue
+    if [ -z "$endpoint" ] || [ -z "$ident" ]; then
+      f="$STATE/$task.status"
+      endpoint=0
+      ident=-
+      if [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; then
+        mtime=$(_fm_status_file_mtime "$f") || mtime=
+        case "$mtime" in ''|*[!0-9]*) ;;
+          *)
+            if [ "$mtime" -le "$epoch" ]; then
+              capture_status_position "$task"
+              endpoint=$CAPTURED_STATUS_ENDPOINT
+              ident=$CAPTURED_STATUS_IDENT
+            fi
+            ;;
+        esac
+      fi
+    fi
+    write_outcome_index "$task" "$seq" "$endpoint" "$ident" || return 1
+  done <<EOF
+$rows
+EOF
+  publish_outcome_index_ready "$(last_seq)"
 }
 
 print_unread() {
@@ -328,10 +381,12 @@ case "$CMD" in
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s}\n' \
+    rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" >> "$STORE"
-    if ! write_outcome_index "$TASK" "$SEQ"; then
+      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    if ! write_outcome_index "$TASK" "$SEQ" || ! publish_outcome_index_ready "$SEQ"; then
       fm_lock_release "$LOCK"
       echo "error: outcome was stored but its bounded task index could not be updated" >&2
       exit 1
@@ -457,6 +512,11 @@ case "$CMD" in
       fi
     else
       write_processed "$CURSOR_SEQ"
+    fi
+    if ! rebuild_outcome_indexes; then
+      fm_lock_release "$LOCK"
+      echo "error: outcome index migration could not be completed safely" >&2
+      exit 1
     fi
     fm_lock_release "$LOCK"
     ;;

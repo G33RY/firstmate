@@ -205,6 +205,7 @@ BRANCH_OUTCOME_INDEX_MAX_BYTES=512
 BRANCH_OUTCOME_INDEX_STATE=ok
 BRANCH_OUTCOME_INDEX_ENDPOINT=
 BRANCH_OUTCOME_INDEX_IDENT=
+STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
 load_branch_outcome_index() { # <task>
   local task=$1 path data version seq endpoint ident extra size
   BRANCH_OUTCOME_INDEX_STATE=ok
@@ -236,13 +237,15 @@ EOF
   fi
   case "$seq:$endpoint" in *[!0-9:]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
   [ -n "$seq" ] && [ -n "$endpoint" ] && [ -n "$ident" ] \
+    && [ "${#seq}" -le 16 ] && [ "${#endpoint}" -le 16 ] \
+    && [ "$seq" -le 9007199254740991 ] && [ "$endpoint" -le 9007199254740991 ] \
     || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
   BRANCH_OUTCOME_INDEX_ENDPOINT=$endpoint
   BRANCH_OUTCOME_INDEX_IDENT=$ident
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident event event_endpoint line verb store lock
+  local snapshot=$1 task endpoint ident event event_endpoint line verb key note receipt store lock ready ready_seq
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
@@ -257,16 +260,40 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history is busy; retry on the next drain.\n'
       return 0
     fi
+    ready="$STATE/.branch-outcome-index-ready"
+    if [ ! -f "$ready" ] || [ ! -r "$ready" ] || [ -L "$ready" ]; then
+      fm_lock_release "$lock"
+      printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes need recovery; restart Pi supervision to repair them.\n'
+      return 0
+    fi
+    ready_seq=$(LC_ALL=C command cat "$ready" 2>/dev/null) || ready_seq=
+    case "$ready_seq" in ''|*[!0-9]*)
+      fm_lock_release "$lock"
+      printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes need recovery; restart Pi supervision to repair them.\n'
+      return 0
+      ;;
+    esac
   fi
 
+  STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident" || continue
     event=$FM_STATUS_SNAPSHOT_EVENT_LINE
     event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
+    receipt=$(status_outcome_backstop_cursor_offset "$STATE/$task.status") || { rc=1; break; }
+    [ "$receipt" -lt "$event_endpoint" ] || continue
     status_is_captain_relevant "$event" || continue
     verb=$(status_line_verb "$event")
-    case "$verb" in needs-decision|blocked) continue ;; esac
+    case "$verb" in
+      needs-decision|blocked)
+        key=$(_fm_decision_key "$event") || key=
+        note=$(status_line_note "$event")
+        if [ -n "$key" ] && _fm_decision_key_transition_allowed "$key" "$note"; then
+          continue
+        fi
+        ;;
+    esac
     load_branch_outcome_index "$task"
     if [ "$BRANCH_OUTCOME_INDEX_STATE" != ok ]; then
       rc=2
@@ -288,6 +315,8 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     fi
     output="$output$line
 "
+    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint
+"
     used=$((used + bytes))
     shown=$((shown + 1))
   done <<EOF
@@ -295,8 +324,10 @@ $snapshot
 EOF
 
   if [ -e "$store" ] || [ -L "$store" ]; then fm_lock_release "$lock"; fi
+  if [ "$rc" -eq 1 ]; then return 1; fi
   if [ "$rc" -eq 2 ]; then
     printf 'STATUS OUTCOME BACKSTOP SKIPPED: a bounded task outcome index could not be read safely; repair it before relying on drain recovery.\n'
+    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
     return 0
   fi
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0

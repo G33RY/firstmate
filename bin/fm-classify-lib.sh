@@ -929,7 +929,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 }
 
 status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident extra cur_ident size legacy
+  local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -938,11 +938,11 @@ status_presentation_cursor_offset() {  # <status-file>
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy extra; do
+    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
-      case "$legacy" in ''|*[!0-9]*) return 1 ;; esac
-      [ -n "$ident" ] || return 1
+      case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
+      [ -n "$legacy" ] && [ -n "$ident" ] || return 1
       if [ "$row_task" = "$task" ]; then
         [ -z "$offset" ] || return 1
         offset=$legacy
@@ -971,6 +971,38 @@ EOF
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
   if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
   printf '%s' "$offset"
+}
+
+status_outcome_backstop_cursor_offset() {  # <status-file>
+  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  state=${f%/*}
+  task=${f##*/}; task=${task%.status}
+  manifest="$state/.status-presentation-cursor"
+  [ -e "$manifest" ] || { printf '0'; return 0; }
+  [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+  backstop=0
+  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
+    [ -n "$row_task" ] || continue
+    [ -z "$extra" ] || return 1
+    case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
+    [ -n "$presented" ] && [ -n "$ident" ] || return 1
+    if [ "$row_task" = "$task" ]; then
+      current=$(_fm_open_decisions_file_ident "$f") || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$ident" = "$current" ] || { printf '0'; return 0; }
+      backstop=${row_backstop:-0}
+      [ "$backstop" -le "$size" ] || backstop=0
+      printf '%s' "$backstop"
+      return 0
+    fi
+  done <<EOF
+$data
+EOF
+  printf '0'
 }
 
 status_signal_seen_marker_path() {  # <state> <task-id>
@@ -1106,7 +1138,7 @@ status_presentation_marker_commit() {
 }
 
 status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
   local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1131,10 +1163,11 @@ status_retire_presentation_task() {  # <state> <task-id>
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
       && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
+        [ -n "$offset" ] || { rc=1; break; }
         [ "$row_task" != "$task" ] || found=1
       done <<EOF
 $data
@@ -1153,12 +1186,13 @@ EOF
     elif ! : > "$tmp"; then
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
+        [ -n "$offset" ] || { rc=1; break; }
         if [ "$row_task" != "$task" ]; then
-          printf '%s\t%s\t%s\n' "$row_task" "$ident" "$offset" >> "$tmp" \
+          printf '%s\t%s\t%s\t%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" >> "$tmp" \
             || { rc=1; break; }
         fi
       done <<EOF
@@ -1211,7 +1245,7 @@ EOF
 }
 
 status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
+  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -1226,7 +1260,15 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
-    printf '%s\t%s\t%s\n' "$task" "$ident" "$endpoint" >> "$tmp" \
+    backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
+    while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
+      if [ "$acknowledged_task" = "$task" ]; then backstop=$acknowledged_endpoint; fi
+    done <<EOF
+${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
+EOF
+    case "$backstop" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
+    [ "$backstop" -le "$size" ] || { rm -f "$tmp"; return 1; }
+    printf '%s\t%s\t%s\t%s\n' "$task" "$ident" "$endpoint" "$backstop" >> "$tmp" \
       || { rm -f "$tmp"; return 1; }
   done <<EOF
 $snapshot
