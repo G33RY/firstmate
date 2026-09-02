@@ -955,6 +955,10 @@ export default function (pi: ExtensionAPI) {
     }
     if (generation.pendingActionables.length > 0) {
       if (loadFailure) surfaceFailure(generation, loadFailure);
+      const armResult = startArm(generation, generation.pendingActionables[0].predecessorArmPid);
+      if (!armResult.ok) {
+        surfaceFailure(generation, `watcher: FAILED - Pi extension could not arm before replacement wake delivery\n${armResult.message}`);
+      }
       void processPendingActionables(generation);
       return;
     }
