@@ -502,7 +502,7 @@ reject_event() {
 # staging and collection is not detected; the staged result stays on the
 # original host and must be re-emitted after the reassignment.
 collect_remote_staged_events() {
-  local dir file id work_home work_home_path sid route_kind rc=0 collect_rc payload line event_id dropped
+  local dir file id loop_state work_home work_home_path sid route_kind rc=0 collect_rc payload line event_id dropped
   dir=$(fm_pf_registry_dir "$STATE")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   for file in "$dir"/*; do
@@ -520,6 +520,8 @@ collect_remote_staged_events() {
       rc=1
       continue
     fi
+    loop_state=$(fm_pf_registry_loop_state "$STATE" "$id")
+    [ "$loop_state" = open ] || continue
     work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
     case "$work_home" in secondmate:*) sid=${work_home#secondmate:} ;; *) continue ;; esac
     work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)

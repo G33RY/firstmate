@@ -2452,6 +2452,33 @@ test_remote_secondmate_loop_delivers_and_retires() {
   pass "a public loop bound to a remote secondmate home delivers and retires"
 }
 
+test_delivered_remote_registration_skips_offline_route() {
+  local home remote log out
+  remote_fixture_prepare
+  home=$(make_home remote-delivered-skip)
+  remote=$(make_remote_route "$home" mini-default)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-remote-delivered req-remote-delivered secondmate:mini-default work-delivered
+  fm_write_meta "$remote/state/work-delivered.meta" \
+    "x_request=req-remote-delivered" "x_request_ts=1700000000" "x_followups=1"
+
+  "$EMIT" --home "$home" --obligation pf-remote-delivered --relation rel-code \
+    --source-home secondmate:mini-default --work-id work-delivered --generation 1 \
+    --outcome report-ready --deliverable report_path=data/work-delivered/report.md \
+    --outcome-text 'The remote lane completed its work.' >/dev/null \
+    || fail "emit failed"
+  run_pf_remote "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf_remote "$home" deliver pf-remote-delivered >/dev/null \
+    || fail "delivery failed"
+  assert_grep 'state=delivered' "$home/state/public-followup/registry/pf-remote-delivered" \
+    "delivery must retain a delivered registration"
+
+  out=$(FM_FAKE_SSH_MODE=unreachable run_pf_remote "$home" consume) \
+    || fail "a delivered registration must not require its remote route: $out"
+  [ -z "$out" ] || fail "a delivered registration must not report an unreached result: $out"
+  pass "delivered remote registrations skip offline collection routes"
+}
+
 # --force governs the unresolved-obligation refusal and nothing else. It never
 # covered the legacy-link clear before this fix and must not start to now: a link
 # still verifiably in place keeps the loop open on either setting.
@@ -3102,6 +3129,7 @@ test_prechange_registration_is_open_and_unrechainable
 test_x_request_teardown_warns_when_final_unposted
 test_secondmate_promotion_uses_teardown_parent_resolution
 test_remote_secondmate_loop_delivers_and_retires
+test_delivered_remote_registration_skips_offline_route
 test_remote_retire_force_semantics_unchanged
 test_remote_retire_refuses_reassigned_route
 test_remote_retire_refuses_unreadable_state
