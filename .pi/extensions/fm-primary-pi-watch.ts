@@ -5,9 +5,9 @@
 // /fork, reload) as well as terminal quit. This extension binds one generation per
 // session activation. Only the active live generation may start, stop, rearm, or
 // clear the arm child. An owning replacement session_start (or fresh factory bind)
-// arms its new generation without a model turn. A replacement also carries an
-// actionable closes that were still pending delivery through the private
-// state/extensions/pi-primary-watch/session-replacement-actionable.json handoff.
+// arms its new generation without a model turn. A replacement handoff carries
+// actionable closes that were still pending delivery; its durable state lives at
+// state/extensions/pi-primary-watch/session-replacement-actionable.json.
 // Terminal quit leaves the final generation stopped so late callbacks cannot rearm.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
