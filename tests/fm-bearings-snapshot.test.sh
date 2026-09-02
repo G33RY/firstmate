@@ -203,8 +203,8 @@ refresh_local_secondmate_ledgers() {  # <parent-home>
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
   case " $* " in
-    *" --all-landed "*) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 refresh_local_secondmate_ledgers "$home" ;;
-    *) refresh_local_secondmate_ledgers "$home" ;;
+    *" --all-landed "*) PATH="$fakebin:$PATH" FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 refresh_local_secondmate_ledgers "$home" ;;
+    *) PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home" ;;
   esac
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
