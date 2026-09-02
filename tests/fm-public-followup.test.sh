@@ -2907,6 +2907,40 @@ test_invalid_registration_fails_remote_collection() {
   pass "invalid registration fails collection without dropping the staged result"
 }
 
+test_unsafe_registration_entry_fails_remote_collection() {
+  local home remote out command registry backup
+  remote_fixture_prepare
+  home=$(make_home remote-unsafe-registration)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-unsafe-registration req-unsafe-registration secondmate:mini-default work-unsafe
+
+  out=$(run_pf "$home" brief pf-unsafe-registration) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  command=${command//<value>/data/work-unsafe/report.md}
+  command=${command//<one bounded public-safe sentence>/The remote lane finished before registration replacement.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the remote route must stage its terminal result"
+
+  registry="$home/state/public-followup/registry/pf-unsafe-registration"
+  backup="$home/state/pf-unsafe-registration.backup"
+  mv "$registry" "$backup"
+  ln -s "$backup" "$registry"
+
+  expect_failure "consume must refuse a symlinked route-bearing registration" \
+    run_pf_remote "$home" consume
+  assert_contains "$EXPECT_OUT" "unreached pf-unsafe-registration" \
+    "consume must name the obligation with an unsafe registration entry"
+  assert_contains "$EXPECT_OUT" "safe regular record" \
+    "consume must identify the unsafe registration entry"
+  assert_contains "$EXPECT_OUT" "stays retained for reconciliation" \
+    "consume must report the remote result as retained"
+  [ -n "$(ls -A "$remote/state/public-followup/outbox" 2>/dev/null)" ] \
+    || fail "an unsafe registration entry must not remove the staged result"
+  [ "$(delivery_state "$home" pf-unsafe-registration)" = pending-work ] \
+    || fail "an unsafe registration entry must leave the promise open"
+  pass "unsafe registration entries fail collection without dropping staged results"
+}
+
 test_remote_route_loss_fails_brief_and_collection() {
   local home remote out command
   remote_fixture_prepare
@@ -3103,6 +3137,7 @@ test_remote_work_home_emit_reaches_owning_home
 test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
 test_invalid_registration_fails_remote_collection
+test_unsafe_registration_entry_fails_remote_collection
 test_remote_route_loss_fails_brief_and_collection
 test_remote_route_reassignment_fails_collection_loudly
 test_remote_brief_rejects_traversal_route_paths

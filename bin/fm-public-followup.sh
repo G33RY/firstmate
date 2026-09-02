@@ -507,9 +507,13 @@ collect_remote_staged_events() {
   dir=$(fm_pf_registry_dir "$STATE")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   for file in "$dir"/*; do
-    [ -f "$file" ] && [ ! -L "$file" ] || continue
     id=$(basename "$file")
     fm_pf_slug_valid "$id" || continue
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+      printf 'unreached %s: registration is not a safe regular record, so its terminal result stays retained for reconciliation\n' "$id"
+      rc=1
+      continue
+    fi
     if ! public_followup_registration_valid "$id"; then
       work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
       printf 'unreached %s: registration cannot resolve its work home route %s, so its terminal result stays retained for reconciliation\n' \
