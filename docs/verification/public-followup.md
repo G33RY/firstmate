@@ -2,13 +2,14 @@
 
 Audience: maintainer verification.
 
-This record supports five active guarantees for promised public replies made through the myfirstmate relay:
+This record supports six active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
 2. A home that never opted into the relay pays nothing for any of it.
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
 4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
 5. A public loop whose work lives in a REMOTE secondmate home retires when readable remote state proves no link exists, or after readable and writable remote state clears the matching bound legacy Relay link; unreadable state, a non-writable matching link, an identity mismatch, a metadata lock it cannot acquire within its bound, or unconfirmed completion retains the loop instead of hanging, and `--force` still covers only the unresolved obligation.
+6. Work bound to a REMOTE secondmate home can report its typed terminal result: the instructions name paths that exist on the worker's own machine, the owning home collects the result over that route, and a route it cannot reach is reported rather than read as an empty inbox.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -18,7 +19,7 @@ Task chronology and delivery evidence stay outside this record.
 Recorded 2026-09-01 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.5, jq 1.8.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
 The stock macOS compatibility lane additionally runs the focused first-registration regression with `/bin/bash` 3.2.57 and a real `tasks-axi` installation.
 The relay is a fakebin `curl` in every case, so no public post is ever made; `tasks-axi` and `jq` are the real tools, because stubbing the obligation state machine would verify nothing.
-The remote-route cases fake only the SSH binary at the `FM_SSH_BIN` process seam and then run the real tracked `fm-remote-entrypoint.sh` against a local checkout standing in for the remote one, so the clear that has to reach the remote home actually runs there; no host and no network are involved.
+The remote-route cases fake only the SSH binary at the `FM_SSH_BIN` process seam and then run the real tracked `fm-remote-entrypoint.sh` against a local checkout standing in for the remote one, so the work that has to reach the remote home actually runs there; no host and no network are involved.
 
 ## Restart end-to-end and regressions
 
@@ -88,6 +89,11 @@ ok - retire fails closed when remote state is non-writable
 ok - retire accepts link absence in non-writable remote state
 ok - the guarded remote clear refuses a lock it cannot acquire instead of hanging
 ok - an unconfirmed remote clear is unknown completion, never a silent close
+ok - a typed terminal result emitted in a remote work home reaches the owning home
+ok - an unreachable remote work home fails loudly instead of reporting an empty inbox
+ok - a local work home's emit path is unchanged
+ok - a duplicate report from a remote work home stays a no-op
+ok - staging refuses an ambiguous destination and a path that is not a firstmate home
 ```
 
 The restart case is the end-to-end proof of guarantee 1.
@@ -114,6 +120,19 @@ The writability precondition narrows the wedge window but cannot close it, becau
 The case asserts the refusal, the retained registration, the absent receipt, the untouched remote link, and that the call returns at all, which is the observable difference from a wait that never ends.
 The final case makes the transport unreachable and asserts the close is refused with the registration retained, the remote link untouched, and unknown completion named rather than reported as a definite failure.
 A remote home running an older Firstmate copy does not recognize the guarded clear flag and therefore fails closed through the same retained-for-reconciliation message; operators must update that home before retrying, and there is deliberately no unguarded fallback.
+
+## Reporting a terminal result from a remote work home
+
+The five emit-leg cases are the proof of guarantee 6.
+They share the same faked-transport fixture as the retire cases above, so the collection that has to happen actually happens with no live host and no network.
+
+The first case pins the trap condition before asserting anything else: the instructions a remote-bound worker receives must not name the owning home's own path, which exists only on the owning machine.
+It then runs exactly the printed command, so what is verified is the instruction the worker actually gets rather than a hand-written approximation, and asserts the typed result reaches the owning home's inbox, that `consume` reports the loop ready, and that the staged copy is retired from the work home afterwards.
+The duplicate case replays both halves - the worker re-reports and the owning home re-collects - and asserts no second ready announcement and no change to the promise, so a retained staged copy after a failed retirement cannot produce a second public reply.
+The unreachable case drives the same route with a transport that never answers and asserts `consume` fails naming the route, says the result stays retained, and leaves the public loop untouched.
+The local case asserts the unchanged path in the same terms: a main-home work binding is still told to emit straight into this home with this checkout's script, that command still runs as printed, and it still publishes into `events/` with nothing staged.
+
+Outward delivery for a remote-home loop is the separate legacy-link clear proven above, not part of this collection path.
 
 ## Relay-disabled zero overhead
 

@@ -14,6 +14,8 @@
 #   bin/fm-public-followup-lib.sh  the activation gate and private transport.
 #   bin/fm-on.sh                the SSH route to a REMOTE secondmate home, whose
 #                               state no local path can reach.
+#   bin/fm-public-followup-collect.sh  reading and retiring the typed terminal
+#                               results staged in a remote work home.
 # This script composes them; it never restates their contracts or schemas.
 #
 # ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: every subcommand gates
@@ -46,7 +48,10 @@
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
 #       must run when its work reaches the promised terminal outcome, so the
 #       binding is copied into a brief instead of hand-assembled. The
-#       --deliverable flags name the obligation's actual required keys.
+#       --deliverable flags name the obligation's actual required keys. For work
+#       bound to a REMOTE secondmate home, the command names that route's own
+#       code root and home with --stage-in, because neither this checkout's path
+#       nor this home's path exists on the machine that worker runs on.
 #
 #   fm-public-followup.sh consume
 #       Drain every pending typed terminal event: validate its derived identity,
@@ -56,6 +61,12 @@
 #       became delivery-ready, and one "rejected <event-id>: <reason>" line per
 #       refusal. Silent when there is nothing to do. Duplicate events and restart
 #       replay are no-ops.
+#       A loop bound to a REMOTE secondmate home is collected first: the staged
+#       results are pulled over that route into this home's own inbox and then
+#       reconciled identically. The staged copy is retired only after this home
+#       holds the result, so a dropped connection cannot lose one. A route that
+#       could not be reached prints one "unreached <obligation-id>: ..." line and
+#       exits non-zero rather than reporting an empty inbox.
 #
 #   fm-public-followup.sh pending
 #       One bounded public-safe line per open public loop, for the session
@@ -337,8 +348,34 @@ cmd_register() {
 
 # --- subcommand: brief ------------------------------------------------------
 
+# brief_emit_target <work-home>: two lines on stdout - the absolute path of the
+# emit script the bound worker must run, and the home flag plus value it must
+# pass. They differ for a REMOTE work home, because both this checkout's path and
+# this home's path exist only on THIS machine: naming either one in instructions
+# for another machine is how a promised public reply silently never arrives.
+brief_emit_target() {
+  local work_home=$1 sid root home
+  case "$work_home" in
+    secondmate:*) sid=${work_home#secondmate:} ;;
+    *) printf '%s\n--home %s\n' "$FM_ROOT/bin/fm-public-followup-emit.sh" "$FM_HOME"; return 0 ;;
+  esac
+  if ! public_followup_route_is_remote "$sid"; then
+    printf '%s\n--home %s\n' "$FM_ROOT/bin/fm-public-followup-emit.sh" "$FM_HOME"
+    return 0
+  fi
+  root=$(secondmate_registry_field "$DATA/secondmates.md" "$sid" root 2>/dev/null) || root=
+  home=$(secondmate_registry_field "$DATA/secondmates.md" "$sid" home 2>/dev/null) || home=
+  case "$root" in /*) ;; *) return 1 ;; esac
+  case "$home" in /*) ;; *) return 1 ;; esac
+  # These two values are printed into a command line the worker runs verbatim, so
+  # keep them to a conservative path charset rather than trusting the record.
+  case "$root$home" in *[!A-Za-z0-9/._+@:-]*) return 1 ;; esac
+  printf '%s\n--stage-in %s\n' "$root/bin/fm-public-followup-emit.sh" "$home"
+}
+
 cmd_brief() {
   local id=${1:-} relation work_home work_id generation payload outcome keys key deliverable_flags
+  local emit_target emit_script emit_home_flag closing_note
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
   fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
@@ -349,6 +386,26 @@ cmd_brief() {
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" generation)
+
+  emit_target=$(brief_emit_target "$work_home") \
+    || die "the work home for '$id' is a remote route with no usable code root and home in data/secondmates.md; fix that record before briefing the bound worker" 1
+  emit_script=$(printf '%s\n' "$emit_target" | sed -n '1p')
+  emit_home_flag=$(printf '%s\n' "$emit_target" | sed -n '2p')
+  # The closing paragraph has to match the destination the command above names,
+  # because "the home above" is the owning home only when the work runs on this
+  # machine. A remote worker is told where its result waits instead.
+  case "$emit_home_flag" in
+    --stage-in*)
+      closing_note='Do not post anything publicly yourself and do not look for the public thread:
+the home that owes that reply is on another machine and owns it. Leave the
+result exactly where the command above puts it; that home collects it over the
+same route it reaches you on, and nothing here needs a path back to it.'
+      ;;
+    *)
+      closing_note='Do not post anything publicly yourself and do not look for the public thread:
+the home above owns the reply.'
+      ;;
+  esac
 
   require_tools
   payload=$(obligation_json "$id") \
@@ -377,8 +434,8 @@ EOF
 When this work reaches its promised terminal outcome, report it as typed data
 (never as a sentence for someone to parse) by running exactly:
 
-  $FM_ROOT/bin/fm-public-followup-emit.sh \\
-    --home $FM_HOME \\
+  $emit_script \\
+    $emit_home_flag \\
     --obligation $id \\
     --relation $relation \\
     --source-home $work_home \\
@@ -387,8 +444,7 @@ When this work reaches its promised terminal outcome, report it as typed data
     --outcome $outcome \\
 ${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
 
-Do not post anything publicly yourself and do not look for the public thread:
-the home above owns the reply.
+$closing_note
 EOF
 }
 
@@ -422,12 +478,97 @@ reject_event() {
   printf 'rejected %s: %s\n' "$event_id" "$reason"
 }
 
+# collect_remote_staged_events: pull every typed terminal result a REMOTE work
+# home has staged for this home into this home's own inbox, so the ordinary
+# reconciliation below sees it. The route transport only runs main -> secondmate,
+# so this is a pull; a worker on the other machine has no path back here.
+#
+# Returns 0 when every remote-bound loop was reached (including when nothing was
+# staged), and 1 when at least one was not. A route that could not be reached is
+# reported by name and never passed off as an empty inbox: the promise is still
+# owed, and the staged result is still on that host.
+collect_remote_staged_events() {
+  local dir file id work_home sid rc=0 collect_rc payload line event_id dropped
+  dir=$(fm_pf_registry_dir "$STATE")
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  for file in "$dir"/*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    id=$(basename "$file")
+    fm_pf_slug_valid "$id" || continue
+    work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+    case "$work_home" in secondmate:*) sid=${work_home#secondmate:} ;; *) continue ;; esac
+    public_followup_route_is_remote "$sid" || continue
+    command -v jq >/dev/null 2>&1 \
+      || die "jq is required to collect a terminal result from a remote work home" 1
+
+    collect_rc=0
+    payload=$("$FM_ROOT/bin/fm-on.sh" "$sid" fm-public-followup-collect.sh drain "$id") \
+      || collect_rc=$?
+    # fm-on.sh returns ssh's status unchanged, so 255 is the established
+    # "delivered but completion unknown" status this codebase reconciles rather
+    # than reads as done or refused.
+    if [ "$collect_rc" -eq 255 ]; then
+      printf 'unreached %s: the work home %s never answered, so its terminal result stays retained there\n' \
+        "$id" "$sid"
+      rc=1
+      continue
+    fi
+    if [ "$collect_rc" -ne 0 ]; then
+      printf 'unreached %s: the work home %s refused the collection (exit %s), so its terminal result stays retained there\n' \
+        "$id" "$sid" "$collect_rc"
+      rc=1
+      continue
+    fi
+
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      event_id=$(printf '%s' "$line" | jq -r '.event_id // empty' 2>/dev/null)
+      if [ "${#line}" -gt "$FM_PF_EVENT_BYTES_MAX" ] \
+        || [ -z "$event_id" ] || ! fm_pf_slug_valid "$event_id"; then
+        printf 'unreached %s: the work home %s returned an unusable terminal result, which stays retained there\n' \
+          "$id" "$sid"
+        rc=1
+        continue
+      fi
+      printf '%s\n' "$line" \
+        | fmx_private_artifact_publish_stdin_once "$(fm_pf_events_dir "$STATE")" "$event_id.json" 600
+      case $? in
+        0|1) ;;
+        *)
+          printf 'unreached %s: a collected terminal result could not be stored here, so it stays retained on %s\n' \
+            "$id" "$sid"
+          rc=1
+          continue
+          ;;
+      esac
+      # Retiring the staged copy is best effort by design: this home now holds
+      # the event durably, and a retained copy is only ever collected again and
+      # dropped as a duplicate.
+      dropped=0
+      "$FM_ROOT/bin/fm-on.sh" "$sid" fm-public-followup-collect.sh drop "$id" "$event_id" \
+        >/dev/null 2>&1 || dropped=$?
+      [ "$dropped" -eq 0 ] \
+        || printf 'collected %s: the copy staged on %s could not be retired and will be collected again\n' \
+             "$event_id" "$sid"
+    done <<EOF
+$payload
+EOF
+  done
+  return "$rc"
+}
+
 cmd_consume() {
   gate_or_exit
-  fm_pf_has_events "$STATE" || exit 0
+  local collect_rc=0
+  collect_remote_staged_events || collect_rc=1
+  if ! fm_pf_has_events "$STATE"; then
+    [ "$collect_rc" -eq 0 ] || exit 1
+    exit 0
+  fi
   require_tools
 
-  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason consume_rc=0
+  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason
+  local consume_rc=$collect_rc
   local obligation delivery request platform
   events_dir=$(fm_pf_events_dir "$STATE")
   consumed_dir=$(fm_pf_consumed_dir "$STATE")
@@ -710,7 +851,7 @@ public_followup_secondmate_home() {
 # here for the same reason fm-on.sh and fm-send.sh treat it as one: a remote home
 # has no local path, so nothing on this disk can answer the question. Resolving
 # it live also means a registration written before this check (they all record an
-# empty work_home_path for a remote route) still retires.
+# empty work_home_path for a remote route) still resolves.
 public_followup_route_is_remote() {
   local id=$1 remote
   fm_pf_home_id_valid "secondmate:$id" || return 1
