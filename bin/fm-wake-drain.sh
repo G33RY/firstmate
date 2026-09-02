@@ -245,7 +245,7 @@ EOF
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident event event_endpoint line verb key note receipt store lock ready ready_seq
+  local snapshot=$1 task endpoint ident event event_endpoint line verb key note receipt overbound store lock ready ready_seq
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
@@ -278,22 +278,30 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident" || continue
-    event=$FM_STATUS_SNAPSHOT_EVENT_LINE
-    event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
     receipt=$(status_outcome_backstop_cursor_offset "$STATE/$task.status") || { rc=1; break; }
-    [ "$receipt" -lt "$event_endpoint" ] || continue
-    status_is_captain_relevant "$event" || continue
-    verb=$(status_line_verb "$event")
-    case "$verb" in
-      needs-decision|blocked)
-        key=$(_fm_decision_key "$event") || key=
-        note=$(status_line_note "$event")
-        if [ -n "$key" ] && _fm_decision_key_transition_allowed "$key" "$note"; then
-          continue
-        fi
-        ;;
-    esac
+    [ "$receipt" -lt "$endpoint" ] || continue
+    overbound=false
+    if status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident"; then
+      event=$FM_STATUS_SNAPSHOT_EVENT_LINE
+      event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
+      [ "$receipt" -lt "$event_endpoint" ] || continue
+      status_is_captain_relevant "$event" || continue
+      verb=$(status_line_verb "$event")
+      case "$verb" in
+        needs-decision|blocked)
+          key=$(_fm_decision_key "$event") || key=
+          note=$(status_line_note "$event")
+          if [ -n "$key" ] && _fm_decision_key_transition_allowed "$key" "$note"; then
+            continue
+          fi
+          ;;
+      esac
+    elif [ "$FM_STATUS_SNAPSHOT_EVENT_OVERBOUND" = true ]; then
+      overbound=true
+      event_endpoint=$endpoint
+    else
+      continue
+    fi
     load_branch_outcome_index "$task"
     if [ "$BRANCH_OUTCOME_INDEX_STATE" != ok ]; then
       rc=2
@@ -305,7 +313,11 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       continue
     fi
 
-    line="$task $event"
+    if [ "$overbound" = true ]; then
+      line="$task latest status event exceeds the 65536-byte backstop inspection bound; inspect $task.status"
+    else
+      line="$task $event"
+    fi
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))

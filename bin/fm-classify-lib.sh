@@ -861,18 +861,21 @@ status_presentation_snapshot() {  # <state>
 # final 64 KiB is inspected, and a file that changes during the read is deferred
 # to the next snapshot instead of combining a line from one state with the mtime
 # from another. The status log is append-only and ordinary event lines are far
-# below this bound; an overlong final event that cannot be read from the bounded
-# tail is deliberately left for its ordinary signal annotation.
+# below this bound. When the newest event crosses the fixed bound, the caller
+# receives an over-bound result and emits a bounded task pointer instead of
+# reading unbounded content or silently dropping the event.
 FM_STATUS_SNAPSHOT_EVENT_LINE=
 FM_STATUS_SNAPSHOT_EVENT_MTIME=
 FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
+FM_STATUS_SNAPSHOT_EVENT_OVERBOUND=false
 # shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
 status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-identity>
-  local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch record line event_endpoint
+  local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch record line event_endpoint rc
   local before_mtime after_mtime before_size after_size before_ident after_ident skip_first=0
   FM_STATUS_SNAPSHOT_EVENT_LINE=
   FM_STATUS_SNAPSHOT_EVENT_MTIME=
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
+  FM_STATUS_SNAPSHOT_EVENT_OVERBOUND=false
   case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
   [ -n "$expected_ident" ] || return 1
 
@@ -893,7 +896,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   scratch="$(_fm_status_span_scratch "$f").latest"
   _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
     || { rm -f "$scratch"; return 1; }
-  record=$(LC_ALL=C perl -e '
+  if record=$(LC_ALL=C perl -e '
     my ($path, $start, $skip_first) = @ARGV;
     open my $file, "<", $path or exit 1;
     binmode $file;
@@ -904,10 +907,17 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
       $line =~ s/[\r\n]+\z//;
       ($latest, $end) = ($line, $start + tell($file));
     }
-    exit 1 unless defined $end;
+    exit 2 unless defined $end;
     print "$end\t$latest";
-  ' "$scratch" "$start" "$skip_first") || { rm -f "$scratch"; return 1; }
+  ' "$scratch" "$start" "$skip_first"); then rc=0; else rc=$?; fi
   rm -f "$scratch"
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 2 ] && [ "$skip_first" -eq 1 ]; then
+      FM_STATUS_SNAPSHOT_EVENT_OVERBOUND=true
+      FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$endpoint
+    fi
+    return 1
+  fi
   event_endpoint=${record%%$'\t'*}
   line=${record#*$'\t'}
   case "$event_endpoint" in ''|*[!0-9]*) return 1 ;; esac

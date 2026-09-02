@@ -265,7 +265,11 @@ rebuild_outcome_indexes() {
         mtime=$(_fm_status_file_mtime "$f") || mtime=
         case "$mtime" in ''|*[!0-9]*) ;;
           *)
-            if [ "$mtime" -le "$epoch" ]; then
+            # Legacy rows have only whole-second epochs, so equal timestamps
+            # cannot prove whether the status preceded the outcome. Leave that
+            # span uncovered: migration may rarely duplicate an old handled
+            # event, but it will not hide a plausibly later captain-facing one.
+            if [ "$mtime" -lt "$epoch" ]; then
               capture_status_position "$task"
               endpoint=$CAPTURED_STATUS_ENDPOINT
               ident=$CAPTURED_STATUS_IDENT
