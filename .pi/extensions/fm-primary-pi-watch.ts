@@ -927,6 +927,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function activateOwnedWatch(owner: SessionGeneration): ArmResult {
+    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     if (lockOwnership() !== "owned") return startArm(owner);
     replacementCoordinator.receiver = receiveReplacementActionable;
     let pending: PendingActionableClose[] = [];
