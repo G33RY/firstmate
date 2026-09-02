@@ -669,6 +669,15 @@ _fm_status_file_size() {  # <status-file>
   fi
 }
 
+_fm_status_file_mtime() {  # <status-file>
+  local f=$1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%m' "$f" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
+  fi
+}
+
 # Private scratch path for a one-shot span read, alongside the status file the
 # same way the cursor above is, and PID-scoped so concurrent readers of one log
 # (the watcher and the away-mode daemon both classify the same stream) never
@@ -845,6 +854,63 @@ status_presentation_snapshot() {  # <state>
     [ -n "$ident" ] || return 1
     printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
   done
+}
+
+# Read the latest non-blank event through one captured presentation endpoint.
+# This is the bounded latest-event owner for fleet-wide backstops: at most the
+# final 64 KiB is inspected, and a file that changes during the read is deferred
+# to the next snapshot instead of combining a line from one state with the mtime
+# from another. The status log is append-only and ordinary event lines are far
+# below this bound; an overlong final event that cannot be read from the bounded
+# tail is deliberately left for its ordinary signal annotation.
+FM_STATUS_SNAPSHOT_EVENT_LINE=
+FM_STATUS_SNAPSHOT_EVENT_MTIME=
+# shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
+status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-identity>
+  local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch line
+  local before_mtime after_mtime before_size after_size before_ident after_ident skip_first=0
+  FM_STATUS_SNAPSHOT_EVENT_LINE=
+  FM_STATUS_SNAPSHOT_EVENT_MTIME=
+  case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ -n "$expected_ident" ] || return 1
+
+  before_mtime=$(_fm_status_file_mtime "$f") || return 1
+  before_size=$(_fm_status_file_size "$f") || return 1
+  before_size=${before_size//[[:space:]]/}
+  before_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  case "$before_mtime:$before_size" in *[!0-9:]*) return 1 ;; esac
+  [ "$before_size" -eq "$endpoint" ] && [ "$before_ident" = "$expected_ident" ] || return 1
+
+  if [ "$endpoint" -gt "$limit" ]; then
+    start=$((endpoint - limit))
+    skip_first=1
+  else
+    start=0
+  fi
+  length=$((endpoint - start))
+  scratch="$(_fm_status_span_scratch "$f").latest"
+  _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
+    || { rm -f "$scratch"; return 1; }
+  line=$(awk -v skip_first="$skip_first" '
+    skip_first && NR == 1 { next }
+    /[^[:space:]]/ { latest=$0; found=1 }
+    END { if (found) printf "%s", latest }
+  ' "$scratch") || { rm -f "$scratch"; return 1; }
+  rm -f "$scratch"
+  [ -n "$line" ] || return 1
+
+  after_mtime=$(_fm_status_file_mtime "$f") || return 1
+  after_size=$(_fm_status_file_size "$f") || return 1
+  after_size=${after_size//[[:space:]]/}
+  after_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  case "$after_mtime:$after_size" in *[!0-9:]*) return 1 ;; esac
+  [ "$after_mtime" = "$before_mtime" ] \
+    && [ "$after_size" -eq "$endpoint" ] \
+    && [ "$after_ident" = "$expected_ident" ] \
+    || return 1
+
+  FM_STATUS_SNAPSHOT_EVENT_LINE=$line
+  FM_STATUS_SNAPSHOT_EVENT_MTIME=$before_mtime
 }
 
 status_presentation_cursor_offset() {  # <status-file>

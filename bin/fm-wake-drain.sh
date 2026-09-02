@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
-# informational status lines, OPEN DECISIONS, and captain-call record
-# divergence, then assert liveness.
+# informational status lines, latest captain-facing statuses not covered by a
+# newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
+# then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -199,6 +200,121 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
+# Build the newest durable supervision-branch outcome epoch for each task.
+# The outcome store remains owned by bin/fm-branch-outcome.sh; this reader needs
+# only its task and epoch provenance fields and never mutates that store or its
+# delivery/processing cursors. A malformed or busy store cannot prove that an
+# event was handled, but it also must not cause a duplicate presentation, so the
+# backstop reports the unavailable proof and retries on the next main drain.
+BRANCH_OUTCOME_EPOCHS=
+BRANCH_OUTCOME_EPOCHS_STATE=ok
+load_branch_outcome_epochs() {
+  local store="$STATE/branch-outcomes.jsonl" lock="$STATE/.branch-outcomes.lock" raw rc
+  BRANCH_OUTCOME_EPOCHS=
+  BRANCH_OUTCOME_EPOCHS_STATE=ok
+  [ -e "$store" ] || [ -L "$store" ] || return 0
+  if [ ! -f "$store" ] || [ ! -r "$store" ] || [ -L "$store" ]; then
+    BRANCH_OUTCOME_EPOCHS_STATE=invalid
+    return 0
+  fi
+  if ! fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
+    BRANCH_OUTCOME_EPOCHS_STATE=busy
+    return 0
+  fi
+  raw=$(jq -r '
+    select(type == "object")
+    | select((.task | type) == "string")
+    | select(
+        (.epoch | type) == "number"
+        and .epoch >= 0
+        and .epoch <= 9007199254740991
+        and .epoch == (.epoch | floor)
+      )
+    | [.task, (.epoch | tostring)]
+    | @tsv
+  ' "$store" 2>/dev/null)
+  rc=$?
+  fm_lock_release "$lock"
+  if [ "$rc" -ne 0 ]; then
+    BRANCH_OUTCOME_EPOCHS_STATE=invalid
+    return 0
+  fi
+  BRANCH_OUTCOME_EPOCHS=$(printf '%s\n' "$raw" | LC_ALL=C awk -F '\t' '
+    NF == 2 && $1 != "" && $2 ~ /^[0-9]+$/ {
+      if (!($1 in latest) || $2 > latest[$1]) latest[$1]=$2
+    }
+    END { for (task in latest) printf "%s\t%s\n", task, latest[task] }
+  ') || BRANCH_OUTCOME_EPOCHS_STATE=invalid
+}
+
+# Main-only loss backstop. The branch itself sees a direct status annotation
+# while handling its granted queue row, so presenting this section there would
+# mistake branch intake for delivery to main. On every main drain, inspect only
+# each task's bounded latest status event. Surface it when captain-relevant and
+# no task-matching branch outcome has a strictly newer epoch. Equality is not
+# proof of causal order at whole-second timestamp resolution, so it stays
+# uncovered: one bounded duplicate is safer than losing a second event appended
+# later in the same second. A successful branch outcome suppresses this section;
+# PR #3312's separate sequence-keyed processing path owns any still-unprocessed
+# branch-tracked outcome.
+print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
+  local snapshot=$1 task endpoint ident event event_mtime latest line verb
+  local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000
+  [ "$ACTOR" = main ] || return 0
+
+  load_branch_outcome_epochs
+  case "$BRANCH_OUTCOME_EPOCHS_STATE" in
+    busy)
+      printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history is busy; retry on the next drain.\n'
+      return 0
+      ;;
+    invalid)
+      printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history could not be read safely; repair it before relying on drain recovery.\n'
+      return 0
+      ;;
+  esac
+
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident" || continue
+    event=$FM_STATUS_SNAPSHOT_EVENT_LINE
+    event_mtime=$FM_STATUS_SNAPSHOT_EVENT_MTIME
+    status_is_captain_relevant "$event" || continue
+    # OPEN DECISIONS is the durable owner for valid blocked/needs-decision
+    # events, including keyless ones. Do not duplicate those rows here or let
+    # this latest-line backstop bypass that fold's reserved-key validation.
+    verb=$(status_line_verb "$event")
+    case "$verb" in needs-decision|blocked) continue ;; esac
+    latest=$(printf '%s\n' "$BRANCH_OUTCOME_EPOCHS" \
+      | LC_ALL=C awk -F '\t' -v task="$task" '$1 == task { print $2; exit }') || return 1
+    if [ -n "$latest" ] && [ "$latest" -gt "$event_mtime" ]; then
+      continue
+    fi
+
+    line="$task $event"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$snapshot
+EOF
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no newer branch outcome):\n' || return 1
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
+  fi
+}
+
 # Print still-unread informational status lines (note: answers and pending-reply
 # resolutions) that the OPEN DECISIONS fold never carries. Uses the same
 # cursor-backed unread span as the annotation path, and runs on every drain -
@@ -359,6 +475,7 @@ print_status_sections() {
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   print_unread_status_section "$snapshot" || return 1
+  print_status_outcome_backstop_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
   status_commit_presentation_snapshot "$STATE" "$acknowledged"

@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# tests/fm-wake-drain-outcome-backstop.test.sh - executable regressions for the
+# main-drain backstop that recovers a captain-facing latest status event after
+# its queue row disappeared without a newer supervision-branch outcome.
+set -u
+
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
+GRANT="$ROOT/bin/fm-wake-grant.sh"
+OUTCOMES="$ROOT/bin/fm-branch-outcome.sh"
+TMP_ROOT=$(fm_test_tmproot fm-wake-drain-outcome-backstop-tests)
+
+set_mtime() {  # <epoch> <file>
+  perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"
+}
+
+append_outcome() {  # <state> <task> <summary>
+  FM_STATE_OVERRIDE="$1" "$OUTCOMES" append \
+    --task "$2" --verdict captain --summary "$3" >/dev/null
+}
+
+backstop_body() {  # <drain-output>
+  awk '
+    /^STATUS OUTCOME BACKSTOP \(/ { in_section=1; next }
+    in_section && /^(OPEN DECISIONS|RECORD DIVERGENCE|UNREAD STATUS|WAKE_ACK_REQUIRED)/ { exit }
+    in_section { print }
+  ' "$1"
+}
+
+test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
+  local dir state out body old
+  dir=$(make_case uncovered-keyless)
+  state="$dir/state"
+  out="$dir/drain.out"
+  old=$(( $(date +%s) - 20 ))
+
+  printf 'done: PR https://example.test/3346 checks green\n' > "$state/done-task.status"
+  printf 'blocked: release credential unavailable\n' > "$state/blocked-task.status"
+  printf 'needs-decision: choose REST or RPC\n' > "$state/decision-task.status"
+  set_mtime "$old" "$state/done-task.status"
+  set_mtime "$old" "$state/blocked-task.status"
+  set_mtime "$old" "$state/decision-task.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "main drain failed for uncovered keyless captain events"
+  grep -F 'STATUS OUTCOME BACKSTOP (' "$out" >/dev/null \
+    || fail "uncovered keyless events produced no outcome backstop: $(cat "$out")"
+  body=$(backstop_body "$out")
+  case "$body" in *'done-task done: PR https://example.test/3346 checks green'*) ;; *) fail "keyless done event did not surface in the backstop: $body" ;; esac
+  grep -F 'blocked-task blocked: release credential unavailable' "$out" >/dev/null \
+    || fail "keyless blocked event did not surface through OPEN DECISIONS: $(cat "$out")"
+  grep -F 'decision-task needs-decision: choose REST or RPC' "$out" >/dev/null \
+    || fail "keyless needs-decision event did not surface through OPEN DECISIONS: $(cat "$out")"
+  pass "a newest keyless done, blocked, or needs-decision event with no newer branch outcome surfaces on the next main drain"
+}
+
+test_newer_task_outcome_and_routine_latest_events_stay_silent() {
+  local dir state out old
+  dir=$(make_case covered-and-routine)
+  state="$dir/state"
+  out="$dir/drain.out"
+  old=$(( $(date +%s) - 20 ))
+
+  printf 'done: already delivered completion\n' > "$state/covered.status"
+  set_mtime "$old" "$state/covered.status"
+  append_outcome "$state" covered 'covered completion reached main'
+  printf 'working: rebased onto merged #76\n' > "$state/working.status"
+  printf 'paused: waiting for the scheduled release window\n' > "$state/paused.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "main drain failed for covered and routine latest events"
+  if grep -F 'STATUS OUTCOME BACKSTOP (' "$out" >/dev/null; then
+    fail "a newer branch outcome or routine latest event was re-presented: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "covered and routine latest events broke the silent drain contract: $(cat "$out")"
+  pass "a newer task-matching branch outcome suppresses the backstop and routine latest events stay silent"
+}
+
+test_older_or_other_task_outcome_cannot_hide_a_new_captain_event() {
+  local dir state out body future
+  dir=$(make_case stale-outcomes)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  append_outcome "$state" same-task 'older completion'
+  append_outcome "$state" unrelated-task 'newer but unrelated completion'
+  future=$(( $(date +%s) + 20 ))
+  printf 'failed: a later attempt failed\n' > "$state/same-task.status"
+  printf 'PR ready for review\n' > "$state/no-task-outcome.status"
+  set_mtime "$future" "$state/same-task.status"
+  set_mtime "$future" "$state/no-task-outcome.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "main drain failed for stale branch outcomes"
+  body=$(backstop_body "$out")
+  case "$body" in *'same-task failed: a later attempt failed'*) ;; *) fail "an older same-task outcome hid a later failure: $body" ;; esac
+  case "$body" in *'no-task-outcome PR ready for review'*) ;; *) fail "another task's newer outcome hid a captain-facing event: $body" ;; esac
+  pass "only a strictly newer outcome for the same task can suppress its latest captain event"
+}
+
+test_branch_annotation_cannot_consume_the_main_resurfacing_backstop() {
+  local dir state branch_out branch_err main_out sequence generation old
+  dir=$(make_case branch-then-main)
+  state="$dir/state"
+  branch_out="$dir/branch.out"
+  branch_err="$dir/branch.err"
+  main_out="$dir/main.out"
+  old=$(( $(date +%s) - 20 ))
+
+  printf 'done: branch intake never produced an outcome\n' > "$state/lost-task.status"
+  set_mtime "$old" "$state/lost-task.status"
+  append_wake "$state" signal lost-task.status 'signal: lost-task.status' \
+    || fail "could not queue the branch-owned status signal"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" mode5-backstop \
+    || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish mode5-backstop 1 \
+    || fail "branch grant publication failed"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$branch_out" 2> "$branch_err" \
+    || fail "branch drain failed: $(cat "$branch_err")"
+  if grep -F 'STATUS OUTCOME BACKSTOP (' "$branch_out" >/dev/null; then
+    fail "the branch actor presented the main-only outcome backstop"
+  fi
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$branch_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$branch_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+    --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "branch acknowledgement did not consume its queue row"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$main_out" \
+    || fail "main drain failed after the branch lost its wake"
+  grep -F 'lost-task done: branch intake never produced an outcome' "$main_out" >/dev/null \
+    || fail "the next main drain did not recover the branch-acknowledged keyless done event: $(cat "$main_out")"
+  pass "a branch annotation and queue acknowledgement cannot consume the main drain's loss backstop"
+}
+
+test_backstop_output_is_bounded() {
+  local dir state out old i payload count longest
+  dir=$(make_case bounded-output)
+  state="$dir/state"
+  out="$dir/drain.out"
+  old=$(( $(date +%s) - 20 ))
+  payload=$(printf '%0300d' 0)
+  i=1
+  while [ "$i" -le 30 ]; do
+    printf 'done: completion-%02d %s\n' "$i" "$payload" > "$state/task-$i.status"
+    set_mtime "$old" "$state/task-$i.status"
+    i=$((i + 1))
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "main drain failed for bounded output"
+  grep -F 'STATUS OUTCOME BACKSTOP:' "$out" | grep -F 'more omitted (byte cap)' >/dev/null \
+    || fail "an over-budget backstop did not report bounded omission: $(cat "$out")"
+  count=$(backstop_body "$out" | grep -c '^task-' || true)
+  [ "$count" -gt 0 ] && [ "$count" -lt 30 ] \
+    || fail "backstop byte cap presented an unexpected task count: $count"
+  longest=$(backstop_body "$out" | awk '{ if (length > max) max=length } END { print max + 0 }')
+  [ "$longest" -le 219 ] || fail "a backstop item exceeded its 219-character budget: $longest"
+  pass "the outcome backstop caps each item and its total task output deterministically"
+}
+
+test_uncovered_keyless_captain_events_surface_on_the_next_main_drain
+test_newer_task_outcome_and_routine_latest_events_stay_silent
+test_older_or_other_task_outcome_cannot_hide_a_new_captain_event
+test_branch_annotation_cannot_consume_the_main_resurfacing_backstop
+test_backstop_output_is_bounded
