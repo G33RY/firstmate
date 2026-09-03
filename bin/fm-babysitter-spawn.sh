@@ -5,6 +5,9 @@
 # Backend: tmux only. Harness: claude only. Launches with
 # FM_SUPERVISION_ACTOR=branch so bin/fm-lease-lib.sh's main-only role
 # partition refuses the judge if it ever calls fm-spawn/pr-merge/merge-local.
+# The registered state/babysitter.check.sh this writes also owns pass cadence
+# (bin/fm-babysitter-invoke-lib.sh), not just liveness - see docs/babysitter.md
+# "Cadence".
 #
 # Usage:
 #   fm-babysitter-spawn.sh launch [--model <name>]
@@ -131,12 +134,17 @@ case "$CMD" in
 set -u
 FM_ROOT_OVERRIDE=$(shell_quote "$FM_ROOT")
 export FM_ROOT_OVERRIDE
+FM_HOME=$(shell_quote "$FM_HOME")
+export FM_HOME
 STATE=$(shell_quote "$STATE")
 CONFIG=$(shell_quote "$CONFIG")
 # shellcheck disable=SC1091
 . $(shell_quote "$SCRIPT_DIR/fm-babysitter-liveness-lib.sh")
 OUT=\$(fm_babysitter_liveness_check)
 printf '%s\n' "\$OUT" | grep -F 'could not be revived'
+# shellcheck disable=SC1091
+. $(shell_quote "$SCRIPT_DIR/fm-babysitter-invoke-lib.sh")
+fm_babysitter_invoke_check >/dev/null 2>&1
 exit 0
 CHECKSH
     if ! chmod 700 "$CHECK_TMP" || ! mv -f "$CHECK_TMP" "$CHECK"; then
