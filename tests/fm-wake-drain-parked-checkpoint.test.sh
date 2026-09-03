@@ -96,6 +96,75 @@ test_working_line_clears_the_marker() {
   pass "a later status line self-clears the parked state and its marker"
 }
 
+test_provably_working_task_is_not_parked() {
+  local dir state out fakebin
+  dir=$(make_case working)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/drain.out"
+  write_meta "$state" task6 ship no-mistakes
+  printf 'done: implemented the fix, committed feed1234\n' > "$state/task6.status"
+
+  # The exact case seen live: a bare done: with a commit and no PR, while
+  # fm-crew-state.sh's run-step read proves validation is already running.
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    "$DRAIN" > "$out" || fail "drain failed on a task whose validation is actually running"
+
+  if grep -F 'PARKED AT CHECKPOINT' "$out" >/dev/null; then
+    fail "a bare done: line was read as parked even though live state proved validation is running: $(cat "$out")"
+  fi
+  [ ! -e "$state/.parked-notified-task6" ] || fail "a marker was left for a task that is not actually parked"
+  if grep -F $'\tcheck\tparked:task6\t' "$state/.wake-queue" >/dev/null 2>&1; then
+    fail "a check: wake was queued for a task whose validation is already running"
+  fi
+  pass "a bare done: line is never read as parked when live state proves validation is running"
+}
+
+test_genuinely_parked_task_is_still_reported() {
+  local dir state out fakebin
+  dir=$(make_case genuinely-parked)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/drain.out"
+  write_meta "$state" task7 ship no-mistakes
+  printf 'done: implemented the fix, committed aaaa111\n' > "$state/task7.status"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting_approval' \
+    "$DRAIN" > "$out" || fail "drain failed on a genuinely parked task"
+
+  grep -F 'PARKED AT CHECKPOINT' "$out" >/dev/null \
+    || fail "a genuinely parked task (live state confirms no active run) was not surfaced: $(cat "$out")"
+  grep -F 'task7' "$out" >/dev/null || fail "genuinely parked task id missing from the section"
+  [ -e "$state/.parked-notified-task7" ] || fail "no idempotency marker was written for the genuinely parked task"
+  pass "a genuinely parked task is still surfaced once live state confirms it, not just the status line"
+}
+
+test_unreadable_live_state_still_reports_a_flagged_task() {
+  local dir state out fakebin
+  dir=$(make_case unreadable)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/drain.out"
+  write_meta "$state" task8 ship no-mistakes
+  printf 'done: implemented the fix, committed bbbb222\n' > "$state/task8.status"
+
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    "$DRAIN" > "$out" || fail "drain failed when the live-state read was unreadable"
+
+  grep -F 'PARKED AT CHECKPOINT' "$out" >/dev/null \
+    || fail "an unreadable live-state read silently dropped a flagged parked task: $(cat "$out")"
+  grep -F 'task8' "$out" >/dev/null || fail "flagged task id missing after an unreadable live-state read"
+  pass "an unreadable live-state read never silently suppresses a flagged parked task"
+}
+
 test_direct_pr_mode_is_never_parked() {
   local dir state out
   dir=$(make_case direct-pr)
@@ -144,5 +213,8 @@ test_parked_ship_task_is_surfaced
 test_parked_task_queues_a_durable_wake
 test_landed_pr_line_is_not_parked
 test_working_line_clears_the_marker
+test_provably_working_task_is_not_parked
+test_genuinely_parked_task_is_still_reported
+test_unreadable_live_state_still_reports_a_flagged_task
 test_direct_pr_mode_is_never_parked
 test_long_wait_fires_tier2_nudge_with_no_task_content
