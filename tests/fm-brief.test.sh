@@ -402,6 +402,52 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_ship_comment_discipline_wording() {
+  local home id brief
+  home="$TMP_ROOT/comment-discipline-home"
+  mkdir -p "$home/data"
+  id="brief-comments-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "# Code comments" "$brief" \
+    "ship brief must carry a standing Code comments section"
+  assert_grep "No multi-paragraph or multi-sentence explanatory blocks" "$brief" \
+    "Code comments section lost the no-explanatory-block rule"
+  assert_grep "Prefer self-documenting code" "$brief" \
+    "Code comments section lost the self-documenting-code preference"
+  assert_grep "No migration notes, PR references, before/after commentary, or TODO archaeology" "$brief" \
+    "Code comments section lost the migration/PR-reference prohibition"
+
+  # The section must land ahead of Setup, where the worker starts writing code,
+  # not buried at the end near the definition of done.
+  local code_line setup_line
+  code_line=$(grep -n "^# Code comments$" "$brief" | head -n1 | cut -d: -f1)
+  setup_line=$(grep -n "^# Setup$" "$brief" | head -n1 | cut -d: -f1)
+  [ -n "$code_line" ] && [ -n "$setup_line" ] && [ "$code_line" -lt "$setup_line" ] \
+    || fail "Code comments section must appear before Setup, not buried at the end"
+  pass "fm-brief.sh: ship brief states comment discipline once, ahead of Setup"
+}
+
+test_scout_and_secondmate_omit_comment_discipline() {
+  local brief
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-c3 alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$BRIEF_HOME/data/brief-scout-c3/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "# Code comments" "$brief" \
+    "scout brief delivers a report, not code; it should not carry the ship-only comment-discipline section"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-c3 --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$BRIEF_HOME/data/brief-sm-c3/brief.md"
+  assert_present "$brief" "secondmate charter was not scaffolded"
+  assert_no_grep "# Code comments" "$brief" \
+    "secondmate charter delegates project work to its own crewmates' ship briefs; it should not restate the comment-discipline section"
+  pass "fm-brief: scout and secondmate briefs do not restate the ship-only comment-discipline section"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -793,6 +839,8 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_comment_discipline_wording
+test_scout_and_secondmate_omit_comment_discipline
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

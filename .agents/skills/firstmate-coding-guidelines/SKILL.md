@@ -117,6 +117,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Never wrap multiple sentences onto one physical line.
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
+- Same terse-comment bar applies to firstmate's own code; see the `# Code comments` section in `bin/fm-brief.sh` for the rule text.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, pinned shellcheck version, and pinned actionlint workflow lint) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other version of either linter.
 - When a task names a specific tool, implement the work with that tool, or explicitly flag the substitution and its new dependency footprint for review before shipping.
