@@ -52,6 +52,10 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Ship briefs carry a standing "Code comments" section (terse comments, no
+# explanatory blocks, no migration/PR-reference notes) right after the task
+# and Herdr sections, ahead of where the worker starts writing code. This is
+# the section's one owner; do not restate the rule elsewhere.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -402,6 +406,12 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+# Code comments
+Terse comments only. No multi-paragraph or multi-sentence explanatory blocks above classes, functions, or config.
+Do not narrate rejected alternatives, recount verification performed, or explain framework internals in a comment; that belongs in the PR description.
+A single short line is fine only where the code cannot express the intent itself. Prefer self-documenting code: a well-named function or value beats any comment.
+No migration notes, PR references, before/after commentary, or TODO archaeology in source.
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
