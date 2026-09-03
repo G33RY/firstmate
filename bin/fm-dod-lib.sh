@@ -58,7 +58,14 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+The \`ci\` step in \`axi status\` stays \`running\` until the PR merges or closes, by design - that alone is never still-waiting evidence.
+Once every other step reads \`completed\` and the PR is open, the return point is any of:
+- the top-level \`outcome\` field reads \`passed\` or \`checks-passed\`;
+- the \`ci\` row's \`active_steps[].last_activity\` text contains \`checks passed\`;
+- that \`last_activity\` text reads \`no CI checks reported - still monitoring until merged or closed\` - the repository has no CI configured, so nothing will ever arrive.
+Do NOT treat \`no CI checks reported yet\` or \`CI checks running\` as that return point - checks may still show up, so keep polling.
+On reaching the return point, append \`done: PR {url} checks green\` and stop. You are finished.
+Do NOT cancel or restart the run, do NOT merge or close the PR, and do NOT pass \`--yes\`: the lingering monitor is harmless and ends when firstmate merges.
 EOF
       ;;
     *)
