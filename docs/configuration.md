@@ -198,6 +198,20 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Babysitter (config/babysitter-enabled, config/babysitter-ntfy-topic)
+
+`config/babysitter-enabled` is local, gitignored, and content-ignored (only its presence matters).
+It is the one-time opt-in for the whole judge-liveness/relaunch layer (`bin/fm-babysitter-liveness-lib.sh`): absent, session start and the watcher's mid-session check never spawn, probe, or relaunch anything - a true no-op, so no other home or test environment is affected by this feature existing.
+Create it once, deliberately, to turn the judge on for this home; the dialog capture hook and ledger are unaffected by this flag and always run in a genuine primary checkout.
+
+`config/babysitter-ntfy-topic` is local, gitignored, mode `600` or tighter, and holds one [ntfy.sh](https://ntfy.sh) topic name.
+It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): present enables it, absent disables it silently.
+`FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default `1800`) rate-limits sends; `FM_BABYSITTER_NTFY_TIMEOUT_SECS` (default `10`) bounds the outbound request.
+`config/babysitter-stall-minutes` (optional, local, gitignored, one positive integer) sets the judge's no-visible-progress stall threshold, default 60 minutes.
+`FM_BABYSITTER_PARKED_TIER2_SECS` (default `1800`) bounds how long a task may sit at the deterministic PARKED AT CHECKPOINT handoff before the tier-2 nudge fires on its own.
+`FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default `3`) bounds consecutive failed judge relaunch attempts before it is reported irrevivable.
+See [`babysitter.md`](babysitter.md) for the full contract, including exactly what survives a session end, a context clear, a reboot, or a terminal-server death.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.

@@ -353,6 +353,59 @@ EOF
   printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
+# PARKED AT CHECKPOINT: mode=no-mistakes ship tasks parked at the deliberate
+# pre-validation done: line (status_is_parked_checkpoint), waiting on
+# firstmate to trigger /no-mistakes (AGENTS.md section 7). Self-clearing.
+# Also queues its own check: wake per newly-parked task (idempotent via
+# state/.parked-notified-<id>) and, past FM_BABYSITTER_PARKED_TIER2_SECS,
+# fires the tier-2 ntfy nudge - deterministic, no judge/LLM involved.
+print_parked_checkpoint_section() {
+  local meta id line age marker output='' shown=0 item_bytes=220 global_bytes=2000 used=0 bytes
+  local tier2_threshold=${FM_BABYSITTER_PARKED_TIER2_SECS:-1800} max_age=0
+
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -q '^kind=ship$' "$meta" 2>/dev/null || continue
+    grep -q '^mode=no-mistakes$' "$meta" 2>/dev/null || continue
+    id=$(basename "$meta"); id=${id%.meta}
+    marker="$STATE/.parked-notified-$id"
+    line=$(last_status_line "$STATE/$id.status") || continue
+    if [ -z "$line" ] || ! status_is_parked_checkpoint "$line"; then
+      rm -f "$marker" 2>/dev/null || true
+      continue
+    fi
+    age=$(fm_path_age "$STATE/$id.status" 2>/dev/null || echo '')
+    case "$age" in ''|*[!0-9]*) age='' ;; esac
+    if [ -n "$age" ]; then
+      line="$id: waiting ${age}s for /no-mistakes - $line"
+      [ "$age" -le "$max_age" ] || max_age=$age
+    else
+      line="$id: waiting for /no-mistakes - $line"
+    fi
+    if [ ! -e "$marker" ]; then
+      fm_wake_append check "parked:$id" "check: task $id is parked at the no-mistakes checkpoint, waiting on firstmate to trigger /no-mistakes" \
+        && : > "$marker" 2>/dev/null || true
+    fi
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    [ $((used + bytes)) -le "$global_bytes" ] || continue
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done
+
+  if [ "$shown" -gt 0 ] && [ "$max_age" -ge "$tier2_threshold" ] && [ -x "$SCRIPT_DIR/fm-babysitter-ntfy.sh" ]; then
+    "$SCRIPT_DIR/fm-babysitter-ntfy.sh" notify --reason parked-checkpoint --count "$shown" --oldest-seconds "$max_age" >/dev/null 2>&1 || true
+  fi
+
+  [ "$shown" -gt 0 ] || return 0
+  printf 'PARKED AT CHECKPOINT (committed, waiting on firstmate to trigger validation - this is the deliberate no-mistakes handoff, not a stuck worker):\n' || return 1
+  printf '%s' "$output" || return 1
+  printf 'PARKED AT CHECKPOINT: trigger /no-mistakes for each one to clear it.\n' || return 1
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -361,6 +414,7 @@ print_status_sections() {
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
+  print_parked_checkpoint_section || return 1
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
