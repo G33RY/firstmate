@@ -277,6 +277,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/babysitter.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/calm-mode-feasibility.md",
       "audience": "maintainer-verification"
     },

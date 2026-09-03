@@ -185,6 +185,19 @@ status_is_paused_or_captain_held() {  # <status-line>
   status_is_paused "$line" || status_is_captain_held "$line"
 }
 
+# 0 if a status line is a no-mistakes ship task's pre-validation checkpoint: a
+# done: line naming no PR URL (self-clearing once a later line supersedes it).
+status_is_parked_checkpoint() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "done" ] || return 1
+  case "$line" in
+    *http://*|*https://*) return 1 ;;
+  esac
+  return 0
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

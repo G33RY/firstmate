@@ -42,6 +42,22 @@ REC
 chmod +x "$_fm_wedge_rec_dir/rec"
 export FM_WEDGE_ALARM_EXEC="$_fm_wedge_rec_dir/rec"
 
+# Babysitter tier-2 notifier recorder (same safety seam pattern as the wedge
+# alarm above, docs/babysitter.md). bin/fm-wake-drain.sh's PARKED AT CHECKPOINT
+# section can fire bin/fm-babysitter-ntfy.sh directly, with no LLM involved, so
+# every wake-queue/drain suite gets this recorder for free rather than risking
+# a real network POST from an incidental fixture. Logs the rendered message to
+# $FM_BABYSITTER_NTFY_LOG (a test sets its own file to assert on); unset means
+# /dev/null.
+_fm_babysitter_ntfy_rec_dir=$(fm_test_tmproot fm-babysitter-ntfy-rec)
+cat > "$_fm_babysitter_ntfy_rec_dir/rec" <<'REC'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-}" >> "${FM_BABYSITTER_NTFY_LOG:-/dev/null}"
+exit 0
+REC
+chmod +x "$_fm_babysitter_ntfy_rec_dir/rec"
+export FM_BABYSITTER_NTFY_EXEC="$_fm_babysitter_ntfy_rec_dir/rec"
+
 # append_wake <state> <kind> <key> <payload>: append a wake record to the durable
 # queue in a subshell scoped to <state>, using the production wake library.
 append_wake() {

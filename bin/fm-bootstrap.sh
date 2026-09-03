@@ -176,6 +176,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-babysitter-liveness-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-babysitter-liveness-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
@@ -1558,6 +1560,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # Babysitter judge liveness (docs/babysitter.md); local-only, so local_phase.
+  local_phase && fm_babysitter_liveness_check
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"
