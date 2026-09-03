@@ -385,6 +385,36 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# The ci step in `axi status` stays `running` until merge/close by design, so
+# the DOD must give the worker a recognizable return point for all three real
+# cases (CI green, CI green but still monitoring, no CI configured at all)
+# instead of naming only the first and leaving the worker to wait forever on
+# the other two (regression: worker sat over an hour on "no CI checks
+# reported - still monitoring until merged or closed" with nothing left to do).
+test_no_mistakes_dod_ci_return_point() {
+  local home id brief
+  home="$TMP_ROOT/ci-return-point-home"
+  mkdir -p "$home/data"
+  id="brief-ci-return-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "stays \`running\` until the PR merges or closes, by design" "$brief" \
+    "no-mistakes DOD must say the ci step's running status is not itself still-waiting evidence"
+  assert_grep "the top-level \`outcome\` field reads \`passed\` or \`checks-passed\`" "$brief" \
+    "no-mistakes DOD must name the terminal-outcome return point"
+  assert_grep "\`active_steps[].last_activity\` text contains \`checks passed\`" "$brief" \
+    "no-mistakes DOD must name the still-monitoring-but-green return point"
+  assert_grep "no CI checks reported - still monitoring until merged or closed\` - the repository has no CI configured, so nothing will ever arrive" "$brief" \
+    "no-mistakes DOD must name the no-CI-configured return point and say nothing will arrive"
+  assert_grep "Do NOT treat \`no CI checks reported yet\` or \`CI checks running\` as that return point" "$brief" \
+    "no-mistakes DOD must distinguish CI merely slow to start from CI genuinely absent"
+  assert_grep "Do NOT cancel or restart the run, do NOT merge or close the PR, and do NOT pass \`--yes\`" "$brief" \
+    "no-mistakes DOD must forbid cancelling, merging, or --yes at the CI return point"
+  pass "fm-brief.sh: no-mistakes DOD states all three CI return-point cases"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -838,6 +868,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_ci_return_point
 test_ship_project_memory_wording
 test_ship_comment_discipline_wording
 test_scout_and_secondmate_omit_comment_discipline
