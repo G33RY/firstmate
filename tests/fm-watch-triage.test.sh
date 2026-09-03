@@ -1858,6 +1858,43 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# docs/babysitter.md: the babysitter judge's idle window between passes is
+# healthy by design, exactly like a secondmate's idle endpoint - its own
+# liveness owner is bin/fm-babysitter-liveness-lib.sh via the registered
+# state/babysitter.check.sh, not the ordinary pane-stale path. Same fixture as
+# test_nonterminal_stale_not_working_surfaced (idle pane, not-provably-working
+# live state) except kind=babysitter, so the only variable is the exclusion.
+test_babysitter_idle_window_never_surfaces_stale() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case babysitter-idle-not-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-babysitter"
+  printf 'idle, waiting for the next pass' > "$capture_file"
+  printf 'window=%s\nkind=babysitter\n' "$window" > "$state/babysitter.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, waiting for the next pass")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Not provably working, exactly like the ordinary-crew case above.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "watcher raised a stale wake for an idle babysitter window: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an idle babysitter window printed a wake reason: $(cat "$out")"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the babysitter poll failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    && fail "an idle babysitter window queued a stale wake: $(cat "$drain_out")"
+  pass "an idle babysitter window between judge passes never raises a stale wake, unlike an ordinary crew task"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -3859,6 +3896,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_babysitter_idle_window_never_surfaces_stale
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

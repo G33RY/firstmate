@@ -1763,6 +1763,9 @@ EOF
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
     kind=$(window_kind "$w")
+    # Babysitter's idle window between passes is healthy by design; its
+    # liveness owner is bin/fm-babysitter-liveness-lib.sh, not this path.
+    [ "$kind" = babysitter ] && continue
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.

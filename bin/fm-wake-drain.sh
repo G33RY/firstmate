@@ -356,6 +356,8 @@ EOF
 # PARKED AT CHECKPOINT: mode=no-mistakes ship tasks parked at the deliberate
 # pre-validation done: line (status_is_parked_checkpoint), waiting on
 # firstmate to trigger /no-mistakes (AGENTS.md section 7). Self-clearing.
+# A flagged candidate is confirmed against live state (crew_is_provably_working)
+# before being reported; an unreadable read does not clear it (see PR).
 # Also queues its own check: wake per newly-parked task (idempotent via
 # state/.parked-notified-<id>) and, past FM_BABYSITTER_PARKED_TIER2_SECS,
 # fires the tier-2 ntfy nudge - deterministic, no judge/LLM involved.
@@ -371,6 +373,10 @@ print_parked_checkpoint_section() {
     marker="$STATE/.parked-notified-$id"
     line=$(last_status_line "$STATE/$id.status") || continue
     if [ -z "$line" ] || ! status_is_parked_checkpoint "$line"; then
+      rm -f "$marker" 2>/dev/null || true
+      continue
+    fi
+    if crew_is_provably_working "$id"; then
       rm -f "$marker" 2>/dev/null || true
       continue
     fi
