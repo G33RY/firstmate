@@ -22,39 +22,15 @@
 set -u
 
 FM_BABYSITTER_INVOKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Portable mtime in epoch seconds; see bin/fm-busy-event.sh for why the two
-# stat forms are never collapsed into one fallback expression.
-if [ "$(uname)" = Darwin ]; then
-  fm_babysitter_invoke_mtime() { stat -f %m "$1" 2>/dev/null; }
-else
-  fm_babysitter_invoke_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
-
-# Oldest unhandled invoke record in <inbox-dir>, or empty when none.
-fm_babysitter_invoke_oldest_msg() {  # <inbox-dir>
-  local dir=$1 f n oldest='' oldest_n=0
-  for f in "$dir"/*.msg; do
-    [ -e "$f" ] || continue
-    n=${f##*/}
-    n=${n%.msg}
-    case "$n" in ''|*[!0-9]*) continue ;; esac
-    if [ -z "$oldest" ] || [ "$((10#$n))" -lt "$oldest_n" ]; then
-      oldest=$f
-      oldest_n=$((10#$n))
-    fi
-  done
-  printf '%s' "$oldest"
-}
+FM_BABYSITTER_INVOKE_TASK=babysitter
 
 fm_babysitter_invoke_check() {
   # shellcheck disable=SC2153 # $STATE/$CONFIG are resolved by the caller before sourcing this lib.
   local meta="$STATE/babysitter.meta" enabled_flag="$CONFIG/babysitter-enabled"
-  local inbox="$STATE/babysitter.inbox"
   local last_invoke_file="$STATE/.babysitter-last-invoke"
   local sweep_secs=${FM_BABYSITTER_SWEEP_INTERVAL_SECS:-1800}
   local stuck_secs=${FM_BABYSITTER_INVOKE_STUCK_SECS:-600}
-  local backend target agent_state oldest now age unread last_invoke home
+  local backend target agent_state oldest now age unread last_invoke home handled
 
   case "$sweep_secs" in ''|*[!0-9]*) sweep_secs=1800 ;; esac
   case "$stuck_secs" in ''|*[!0-9]*) stuck_secs=600 ;; esac
@@ -73,17 +49,22 @@ fm_babysitter_invoke_check() {
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   [ "$agent_state" = alive ] || return 0
 
+  if ! command -v fm_task_inbox_oldest_unhandled >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-task-inbox-lib.sh
+    . "$FM_BABYSITTER_INVOKE_LIB_DIR/fm-task-inbox-lib.sh"
+  fi
+
   now=$(date +%s)
 
-  oldest=$(fm_babysitter_invoke_oldest_msg "$inbox")
-  if [ -n "$oldest" ]; then
-    age=$(( now - $(fm_babysitter_invoke_mtime "$oldest" || echo "$now") ))
+  if oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$FM_BABYSITTER_INVOKE_TASK"); then
+    age=$(fm_path_age "$oldest")
     case "$age" in ''|*[!0-9]*) age=0 ;; esac
     if [ "$age" -lt "$stuck_secs" ]; then
       return 0
     fi
-    mkdir -p "$inbox/handled" 2>/dev/null || true
-    mv -f "$oldest" "$inbox/handled/${oldest##*/}" 2>/dev/null || true
+    handled=$(fm_task_inbox_handled_dir "$STATE" "$FM_BABYSITTER_INVOKE_TASK")
+    mkdir -p "$handled" 2>/dev/null || true
+    mv -f "$oldest" "$handled/${oldest##*/}" 2>/dev/null || true
   fi
 
   unread=$(FM_STATE_OVERRIDE="$STATE" "$FM_BABYSITTER_INVOKE_LIB_DIR/fm-babysitter-ledger.sh" unread 2>/dev/null) || unread=""
