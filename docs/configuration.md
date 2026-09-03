@@ -210,6 +210,8 @@ It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): prese
 `config/babysitter-stall-minutes` (optional, local, gitignored, one positive integer) sets the judge's no-visible-progress stall threshold, default 60 minutes.
 `FM_BABYSITTER_PARKED_TIER2_SECS` (default `1800`) bounds how long a task may sit at the deterministic PARKED AT CHECKPOINT handoff before the tier-2 nudge fires on its own.
 `FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default `3`) bounds consecutive failed judge relaunch attempts before it is reported irrevivable.
+`FM_BABYSITTER_SWEEP_INTERVAL_SECS` (default `1800`) bounds how long a judge pass may go undispatched with no new ledger content before the deterministic cadence check (`bin/fm-babysitter-invoke-lib.sh`) fires one anyway, so a stall with no new dialog still gets a sweep.
+`FM_BABYSITTER_INVOKE_STUCK_SECS` (default `600`) is how long an unacknowledged pass-dispatch record may sit in the judge's steering inbox before the cadence check treats it as orphaned rather than in flight.
 See [`babysitter.md`](babysitter.md) for the full contract, including exactly what survives a session end, a context clear, a reboot, or a terminal-server death.
 
 ## Gate defaults (.no-mistakes.yaml)

@@ -99,6 +99,20 @@ test_launch_writes_meta_brief_and_submits() {
   pass "launch writes meta, writes a brief pointing at the owner doc, and sends+submits the launch command"
 }
 
+test_launch_registers_check_with_invoke_cadence() {
+  local dir check
+  dir=$(fake_tmux_case check-wiring)
+  PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    "$SPAWN" launch > "$dir/out" 2>&1 || fail "launch failed: $(cat "$dir/out")"
+
+  check="$dir/state/babysitter.check.sh"
+  [ -f "$check" ] || fail "no check.sh was written"
+  grep -q 'fm-babysitter-invoke-lib.sh' "$check" || fail "check.sh does not source the pass-cadence library: $(cat "$check")"
+  grep -q 'fm_babysitter_invoke_check' "$check" || fail "check.sh does not call fm_babysitter_invoke_check: $(cat "$check")"
+  grep -q '^export FM_HOME$' "$check" || fail "check.sh does not export FM_HOME for the invoke library's fm-send.sh call: $(cat "$check")"
+  pass "the registered check.sh sources the pass-cadence library and exports FM_HOME for it, alongside the existing liveness check"
+}
+
 test_relaunch_kills_the_old_window_first() {
   local dir
   dir=$(fake_tmux_case relaunch)
@@ -126,5 +140,6 @@ test_launch_defaults_model_to_sonnet() {
 }
 
 test_launch_writes_meta_brief_and_submits
+test_launch_registers_check_with_invoke_cadence
 test_relaunch_kills_the_old_window_first
 test_launch_defaults_model_to_sonnet
