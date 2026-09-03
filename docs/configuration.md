@@ -206,7 +206,7 @@ Create it once, deliberately, to turn the judge on for this home; the dialog cap
 
 `config/babysitter-ntfy-topic` is local, gitignored, mode `600` or tighter, and holds one [ntfy.sh](https://ntfy.sh) topic name.
 It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): present enables it, absent disables it silently.
-`FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default `1800`) rate-limits sends; `FM_BABYSITTER_NTFY_TIMEOUT_SECS` (default `10`) bounds the outbound request.
+`FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default `1800`) rate-limits sends per reason (unmet-commitment, parked-checkpoint, judge-down each rate-limit independently); `FM_BABYSITTER_NTFY_TIMEOUT_SECS` (default `10`) bounds the outbound request.
 `config/babysitter-stall-minutes` (optional, local, gitignored, one positive integer) sets the judge's no-visible-progress stall threshold, default 60 minutes.
 `FM_BABYSITTER_PARKED_TIER2_SECS` (default `1800`) bounds how long a task may sit at the deterministic PARKED AT CHECKPOINT handoff before the tier-2 nudge fires on its own.
 `FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default `3`) bounds consecutive failed judge relaunch attempts before it is reported irrevivable.

@@ -81,6 +81,17 @@ test_rate_limit_suppresses_a_second_send() {
   pass "a second notify within the cooldown window is suppressed"
 }
 
+test_rate_limit_is_scoped_per_reason() {
+  local dir
+  dir=$(new_case cross-reason)
+  run_notify "$dir" --reason unmet-commitment --count 1 --oldest-seconds 10
+  run_notify "$dir" --reason parked-checkpoint --count 1 --oldest-seconds 10
+  run_notify "$dir" --reason judge-down --count 1 --oldest-seconds 10
+  COUNT=$(grep -c 'ARGV1=' "$dir/recorded")
+  [ "$COUNT" -eq 3 ] || fail "a send for one reason suppressed a send for a different reason: $COUNT sent, expected 3"
+  pass "unmet-commitment, parked-checkpoint, and judge-down rate-limit independently"
+}
+
 test_topic_file_must_be_private() {
   local dir
   dir=$(new_case perm)
@@ -94,4 +105,5 @@ test_only_fixed_template_reaches_the_payload
 test_free_text_reason_is_rejected_not_forwarded
 test_disabled_without_topic_file
 test_rate_limit_suppresses_a_second_send
+test_rate_limit_is_scoped_per_reason
 test_topic_file_must_be_private

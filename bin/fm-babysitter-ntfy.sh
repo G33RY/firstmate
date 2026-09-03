@@ -5,7 +5,8 @@
 # Message is always one of three fixed templates with only plain integers
 # interpolated - no caller text ever reaches the payload.
 # Topic: $CONFIG/babysitter-ntfy-topic (mode 600/400); absent = tier 2 disabled.
-# Rate limit: FM_BABYSITTER_NTFY_COOLDOWN_SECS (default 1800s), enforced here.
+# Rate limit: FM_BABYSITTER_NTFY_COOLDOWN_SECS (default 1800s), enforced here
+# per reason (unmet-commitment, parked-checkpoint, judge-down rate-limit independently).
 # Test seam: FM_BABYSITTER_NTFY_EXEC.
 #
 # Usage:
@@ -19,7 +20,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 TOPIC_FILE="$CONFIG/babysitter-ntfy-topic"
-LAST_FILE="$STATE/.babysitter-ntfy-last"
 COOLDOWN=${FM_BABYSITTER_NTFY_COOLDOWN_SECS:-1800}
 TIMEOUT=${FM_BABYSITTER_NTFY_TIMEOUT_SECS:-10}
 case "$COOLDOWN" in ''|*[!0-9]*) COOLDOWN=1800 ;; esac
@@ -49,18 +49,18 @@ read_topic() {
 }
 
 cooldown_elapsed() {
-  local last now
-  [ -e "$LAST_FILE" ] || return 0
-  last=$(cat "$LAST_FILE" 2>/dev/null || echo 0)
+  local last_file="$1" last now
+  [ -e "$last_file" ] || return 0
+  last=$(cat "$last_file" 2>/dev/null || echo 0)
   bounded_uint "$last" || return 0
   now=$(date +%s 2>/dev/null || echo 0)
   [ $((now - last)) -ge "$COOLDOWN" ]
 }
 
 record_sent() {
-  local tmp
-  tmp="$LAST_FILE.tmp.$$"
-  date +%s > "$tmp" 2>/dev/null && mv -f "$tmp" "$LAST_FILE" 2>/dev/null
+  local last_file="$1" tmp
+  tmp="$last_file.tmp.$$"
+  date +%s > "$tmp" 2>/dev/null && mv -f "$tmp" "$last_file" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
 }
 
@@ -83,9 +83,10 @@ case "$CMD" in
     case "$REASON" in unmet-commitment|parked-checkpoint|judge-down) ;; *) usage ;; esac
     bounded_uint "$COUNT" || usage
     bounded_uint "$OLDEST" || usage
+    LAST_FILE="$STATE/.babysitter-ntfy-last-$REASON"
 
     TOPIC=$(read_topic) || exit 0
-    cooldown_elapsed || exit 0
+    cooldown_elapsed "$LAST_FILE" || exit 0
 
     case "$REASON" in
       unmet-commitment)
@@ -105,7 +106,7 @@ case "$CMD" in
       command -v curl >/dev/null 2>&1 || exit 0
       curl -sS -m "$TIMEOUT" -d "$MESSAGE" "https://ntfy.sh/$TOPIC" >/dev/null 2>&1 || true
     fi
-    record_sent
+    record_sent "$LAST_FILE"
     ;;
   *) usage ;;
 esac

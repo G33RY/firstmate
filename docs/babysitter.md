@@ -48,7 +48,7 @@ Never read your own findings store from the start either; if you need to check w
 
 ## Escalation content restriction
 
-`bin/fm-babysitter-ntfy.sh` is the single tier-2 sender, used by both the judge and the deterministic parked-checkpoint path. It reads the ntfy topic fresh from `config/babysitter-ntfy-topic` (absent = tier 2 disabled), rate-limits to one send per `FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default 1800s), and only ever sends one of three fixed templates with a plain count and a plain age in seconds interpolated - no chat content, project name, task id, PR URL, or file path can reach the payload, because the CLI has no parameter that accepts one.
+`bin/fm-babysitter-ntfy.sh` is the single tier-2 sender, used by both the judge and the deterministic parked-checkpoint path. It reads the ntfy topic fresh from `config/babysitter-ntfy-topic` (absent = tier 2 disabled), rate-limits each reason (`unmet-commitment`, `parked-checkpoint`, `judge-down`) independently to one send per `FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default 1800s) so one condition's push cannot suppress a different condition's push, and only ever sends one of three fixed templates with a plain count and a plain age in seconds interpolated - no chat content, project name, task id, PR URL, or file path can reach the payload, because the CLI has no parameter that accepts one.
 
 ## Liveness and persistence guarantees
 
