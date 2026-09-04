@@ -137,6 +137,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/decision-ledger/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -346,6 +350,10 @@
     },
     {
       "path": "docs/gitlab-merge-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/decision-ledger-page.md",
       "audience": "maintainer-verification"
     },
     {
