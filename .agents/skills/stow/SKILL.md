@@ -212,6 +212,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 
 1. **Sweep the session for uncaptured durable knowledge.**
    Look for operational learnings, captain preferences expressed in passing, project-intrinsic facts, standing decisions, and undone next steps.
+   Also load `decision-ledger` and file any captain-level call, worker overrule, or firstmate mistake this session made but never logged.
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
    AGENTS.md section 6 is the source of truth for destinations.
    Do not re-derive or duplicate that mapping here.

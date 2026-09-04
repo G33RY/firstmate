@@ -87,6 +87,8 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
+  decisions/<project>/ledger.md   per-project durable decision ledger, keyed by the project name used in `projects/` and `data/projects.md` (firstmate's own tooling decisions use `firstmate`); `decision-ledger` skill owns the entry contract; created lazily, absent until this project has a decision to record
+  decisions/<project>/page.json   that ledger's published-page identity (site id, update key, URL, page password); bin/fm-decision-ledger-page.sh owns publish/update mechanics so the page is updated in place, never re-created
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
@@ -445,6 +447,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 - Any other unmarked message means the captain returned; load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears.
 - Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
 - Bias ambiguous input toward exit because a present captain takes precedence.
+- Any call away mode makes that would otherwise be the captain's, including overruling a worker or catching firstmate's own mistake, is recorded in that project's decision ledger; see `decision-ledger`.
 
 ### Stuck-worker trigger
 
@@ -552,6 +555,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any `RECORD DIVERGENCE` line from the wake drain.
+- `decision-ledger` - load whenever firstmate, working autonomously, answers a question that would otherwise be the captain's, overrules a worker or blocks delivery, or catches its own mistake including a correction to an earlier entry; also load from `/stow` and from the away-mode return to file any such call this session made but never logged.
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
