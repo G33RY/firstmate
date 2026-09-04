@@ -73,6 +73,7 @@ require_project() {
   case "${1:-}" in
     '') fail "missing <project>" ;;
     */*) fail "project must be a bare name, not a path: $1" ;;
+    .|..) fail "project must be a bare name, not a path: $1" ;;
   esac
 }
 
