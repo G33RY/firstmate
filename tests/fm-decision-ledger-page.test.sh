@@ -140,8 +140,26 @@ test_publish_rejects_a_path_as_project() {
   pass "a project name containing a path separator is rejected before any request"
 }
 
+test_publish_rejects_bare_dotdot_as_project() {
+  local dir rc
+  dir=$(new_case dotdotcheck)
+  fake_exec "$dir"
+  printf '200\t{}\n' > "$dir/responses"
+  rc=0
+  run_ledger "$dir" publish ".." "$dir/page.html" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a bare '..' project name was accepted"
+  [ ! -f "$dir/calls" ] || fail "an HTTP call was made for a rejected project name"
+
+  rc=0
+  run_ledger "$dir" publish "." "$dir/page.html" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a bare '.' project name was accepted"
+  [ ! -f "$dir/calls" ] || fail "an HTTP call was made for a rejected project name"
+  pass "a bare '.' or '..' project name is rejected before any request"
+}
+
 test_first_publish_creates_and_records
 test_second_publish_updates_in_place
 test_rejected_update_fails_without_recreating
 test_info_reads_the_stored_record
 test_publish_rejects_a_path_as_project
+test_publish_rejects_bare_dotdot_as_project
