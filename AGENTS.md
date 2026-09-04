@@ -88,7 +88,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   decisions/<project>/ledger.md   per-project durable decision ledger, keyed by the project name used in `projects/` and `data/projects.md` (firstmate's own tooling decisions use `firstmate`); `decision-ledger` skill owns the entry contract; created lazily, absent until this project has a decision to record
-  decisions/<project>/page.json   that ledger's published-page identity (site id, update key, URL, page password); bin/fm-decision-ledger-page.sh owns publish/update mechanics so the page is updated in place, never re-created
+  decisions/<project>/page.json   that ledger's published-page identity, a Claude artifact or a hosted ht-ml.app page; `decision-ledger` skill owns which surface applies and bin/fm-decision-ledger-page.sh owns the hosted page's publish/update mechanics so it is updated in place, never re-created
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
