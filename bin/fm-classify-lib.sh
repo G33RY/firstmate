@@ -1609,18 +1609,77 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+#
+# The one place that invokes FM_CREW_STATE_BIN, so crew_absorb_class and
+# crew_run_step_detail below always read the exact same call. Prints the raw
+# line and returns 0 for a nonempty id, regardless of fm-crew-state.sh's own
+# exit status (it always exits 0 on a successful read; a nonzero here is only
+# its usage error, which an empty id already screens out); returns 1 without
+# printing for an empty id.
+_crew_state_line() {  # <id>
+  [ -n "${1:-}" ] || return 1
+  "$FM_CREW_STATE_BIN" "$1" 2>/dev/null
+  return 0
+}
+
+# <with_detail>, when passed as any nonempty value, appends two tab-separated
+# fields to the printed class: the source token ('run-step'/'pane', empty for
+# 'paused'/'none') and the run-step detail text (populated only when source is
+# 'run-step', empty otherwise) - the SAME single crew-state read this function
+# already makes, so a caller that needs to tell a run-step-sourced 'working'
+# apart from a pane-sourced one, and grab the run-step's detail text in that
+# same read, such as fm-watch.sh's handle_run_step_stale callers, can do so
+# without a second invocation of crew_run_step_detail (which would re-read
+# $FM_CREW_STATE_BIN). Omitting <with_detail> keeps the original single-token
+# contract exactly.
+crew_absorb_class() {  # <id> [with_detail]
+  local id=$1 with_detail=${2:-} line state rest src detail
+  line=$(_crew_state_line "$id") || { printf 'none'; [ -z "$with_detail" ] || printf '\t\t'; return; }
+  case "$line" in state:*) ;; *) printf 'none'; [ -z "$with_detail" ] || printf '\t\t'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = paused ]; then printf 'paused'; [ -z "$with_detail" ] || printf '\t\t'; return; fi
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    rest=${line#*source: }
+    src=${rest%% *}
+    case "$src" in
+      run-step)
+        printf 'working'
+        if [ -n "$with_detail" ]; then
+          detail=${rest#*" · "}
+          [ "$detail" != "$rest" ] || detail=""
+          printf '\t%s\t%s' "$src" "$detail"
+        fi
+        return
+        ;;
+      pane) printf 'working'; [ -z "$with_detail" ] || printf '\t%s\t' "$src"; return ;;
+    esac
   fi
-  printf 'none'
+  printf 'none'; [ -z "$with_detail" ] || printf '\t\t'
+}
+
+# The detail text behind crew_absorb_class's 'working' token, but ONLY for the
+# run-step-sourced case (an active no-mistakes run step: review/fixing or ci
+# monitoring) - never a busy pane, which crew_absorb_class's 'working' token
+# also covers but this deliberately excludes, since a busy pane has no
+# equivalent "reported position" to compare across bounded rechecks. Prints
+# the detail text and returns 0 when crew <id> is currently run-step-working;
+# returns 1, printing nothing, for every other outcome (paused, a busy pane,
+# or no confirmable run at all), so a caller can treat them all the same way:
+# stop trusting the run-step cadence. Used by fm-watch.sh's bounded run-step
+# cadence to tell "the step is quiet" (detail unchanged, still confirmed
+# working) from "the step is not moving" (no longer confirmable at all).
+crew_run_step_detail() {  # <id>
+  local id=$1 line state rest src detail
+  line=$(_crew_state_line "$id") || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  rest=${line#*source: }
+  src=${rest%% *}
+  [ "$src" = run-step ] || return 1
+  detail=${rest#*" · "}
+  [ "$detail" != "$rest" ] || detail=""
+  printf '%s' "$detail"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

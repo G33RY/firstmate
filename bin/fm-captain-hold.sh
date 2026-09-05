@@ -767,7 +767,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc pre_last
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -825,6 +825,7 @@ EOF
     # guarded self-announced append (bin/fm-wake-lib.sh) and does not wake this
     # same session; an append failure still fails this command loudly.
     if [ -n "$keys" ]; then
+      pre_last=$(last_status_line "$status_file")
       while IFS=$'\t' read -r key _verb _summary; do
         [ -n "$key" ] || continue
         transfer_rc=0
@@ -834,6 +835,10 @@ EOF
       done <<EOF
 $raw_open
 EOF
+      # A captain-held transfer for one decision must not silently cancel a
+      # still-true declared wait the crew is otherwise honoring; see
+      # fm_wake_reassert_declared_wait's header for why.
+      fm_wake_reassert_declared_wait "$STATE" "$status_file" "$pre_last"
     fi
   fi
   printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"

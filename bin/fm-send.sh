@@ -598,8 +598,9 @@ fi
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
 # concurrent foreign status bytes leave the watcher's wake path untouched.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line append_rc
+  local note=$1 k line append_rc pre_last
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  pre_last=$(last_status_line "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_STATUS_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
@@ -610,6 +611,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
       return 1
     fi
   done
+  # Answering an unrelated decision must not silently cancel a still-true
+  # declared wait the crew is otherwise honoring; see
+  # fm_wake_reassert_declared_wait's header for why.
+  fm_wake_reassert_declared_wait "$STATE" "$RESOLVE_STATUS_FILE" "$pre_last"
 }
 
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed

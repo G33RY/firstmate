@@ -301,6 +301,42 @@ test_answer_records_and_closes() {
   pass "answer records the captain's words, closes idempotently, and releases routed work"
 }
 
+# Completing the captain-call inventory must not silently cancel a still-true
+# declared external-wait pause: the captain-held transfer line it appends for
+# each open status decision is the file's newest line the moment it lands, and
+# fm-watch.sh's wedge detection is last-line-wins (fm-classify-lib.sh's
+# status_is_paused_or_captain_held), so a still-active "paused:" line sitting
+# above the open decision would otherwise be silently retired by the transfer.
+# Mirrors fm-send.sh's own reassert regression (tests/fm-send-resolve-key.test.sh's
+# test_answer_reasserts_a_still_active_pause) for this second writer.
+test_completion_transfer_reasserts_a_still_active_pause() {
+  local home id json
+  home=$(make_home reassert-pause)
+  id=sample-pause-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample pause path" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the reassert-pause origin"
+  write_origin_meta "$home" "$id"
+  printf '# Sample pause review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  {
+    printf 'needs-decision [key=fallback]: pick a fallback\n'
+    printf 'paused: waiting on the ci merge queue\n'
+  } > "$home/state/$id.status"
+  run_captain "$home" hold sample-pause-call \
+    --title "Choose the fallback" --reason "captain fallback choice pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+
+  run_captain "$home" complete "$id" sample-pause-call >/dev/null \
+    || fail "completion failed for the held inventory"
+
+  grep -F 'captain-held [key=fallback]: tracked by sample-pause-call' "$home/state/$id.status" >/dev/null \
+    || fail "the transfer line does not name the tracking inventory: $(cat "$home/state/$id.status")"
+  json=$(grep -v '^[[:space:]]*$' "$home/state/$id.status" | tail -1)
+  [ "$json" = 'paused: waiting on the ci merge queue' ] \
+    || fail "the still-active pause was not reasserted as the newest line: $(cat "$home/state/$id.status")"
+  pass "completion's captain-held transfer reasserts a still-active pause"
+}
+
 # --release lifts the hold instead of closing, preserving the work item's own
 # body under the record; a re-held task later accepts a new answer.
 test_release_frees_held_work() {
@@ -1171,6 +1207,7 @@ EOF
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
+test_completion_transfer_reasserts_a_still_active_pause
 test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable

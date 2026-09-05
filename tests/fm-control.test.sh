@@ -695,6 +695,36 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+# A worker firstmate stops on purpose (a blocked/idle task, not a wedge) must
+# not keep wedge-escalating on the watcher's ordinary stale cadence for as
+# long as it stays stopped: exit records a "paused:" status line so the
+# watcher's existing declared-external-wait cadence (bin/fm-watch.sh's
+# pause_state_class, which already trusts a "paused:" line once the agent is
+# confirmed dead) applies instead.
+test_exit_records_a_deliberate_stop_status_line() {
+  local dir out rc
+  dir=$(new_case deliberate-stop)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an idle agent should succeed"$'\n'"$out"
+  grep -Eq '^paused: stopped by firstmate' "$dir/home/state/t1.status" \
+    || fail "exit did not record a deliberate-stop status line: $(cat "$dir/home/state/t1.status" 2>/dev/null)"
+  pass "fm-control exit: records a paused status line so a deliberate stop never wedge-escalates"
+}
+
+test_already_stopped_exit_also_records_a_deliberate_stop_status_line() {
+  local dir out rc
+  dir=$(new_case deliberate-stop-idempotent)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an already-stopped agent should succeed"
+  grep -Eq '^paused: stopped by firstmate' "$dir/home/state/t1.status" \
+    || fail "an already-stopped exit did not record a deliberate-stop status line: $(cat "$dir/home/state/t1.status" 2>/dev/null)"
+  pass "fm-control exit: an already-stopped agent also records the deliberate-stop status line"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -899,6 +929,8 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
+test_exit_records_a_deliberate_stop_status_line
+test_already_stopped_exit_also_records_a_deliberate_stop_status_line
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

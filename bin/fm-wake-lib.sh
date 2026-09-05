@@ -1749,6 +1749,24 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   return 0
 }
 
+# Re-assert a still-true declared external wait or captain-held transfer
+# after appending a decision-CLOSING line (an answerer-closes resolved line,
+# or a captain-held transfer) to <status-file>. Both declarations are
+# last-line-wins for wedge-detection purposes
+# (fm-classify-lib.sh's status_is_paused_or_captain_held), so a closing line
+# for an UNRELATED decision that lands after a still-active declaration would
+# otherwise become the file's newest line and silently end a wait the close
+# never touched. <pre-last> is the file's last line, captured by the caller
+# BEFORE its own closing append(s); a no-op when that line was not itself a
+# pause or hold declaration. Best-effort: the caller's own close already
+# succeeded, so a failure here is not reported.
+fm_wake_reassert_declared_wait() {  # <state> <status-file> <pre-last>
+  local state=$1 file=$2 pre_last=$3
+  _fm_wake_require_classify || return 0
+  status_is_paused_or_captain_held "$pre_last" || return 0
+  fm_wake_status_append_self_announced "$state" "$file" "$pre_last" >/dev/null 2>&1 || true
+}
+
 # Map one structurally valid signal key to its home-local status filename.
 # Queue payload text is intentionally ignored: it is display data, not a path
 # authority. The caller still verifies the resulting regular file immediately

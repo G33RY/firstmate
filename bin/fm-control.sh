@@ -30,7 +30,10 @@
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent).
+#              Already-stopped is success (idempotent). Also records a
+#              "paused:" status line so the watcher's wedge detection treats
+#              the now-idle pane as a deliberate stop rather than a possible
+#              wedge until the task is relaunched (record_deliberate_stop).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -442,6 +445,23 @@ retire_busy_incarnation() {
   fi
 }
 
+# Durable record that firstmate stopped this task's agent ON PURPOSE, so the
+# watcher's wedge detection stops treating the now-idle pane as a possible
+# wedge instead of escalating it every few minutes for as long as it stays
+# stopped. Reuses the existing declared-external-wait status verb rather than
+# a new marker: bin/fm-crew-state.sh already reports a confirmed-dead ordinary
+# crew's declared "paused:" line as still paused (bin/fm-watch.sh's
+# pause_state_class), so the watcher's bounded pause-recheck cadence applies
+# with no further code needed there, and it self-clears the moment the task's
+# agent is alive again (a relaunch or any other resumption), since that same
+# reconciliation stops trusting a stale declaration once the agent is no
+# longer confirmably dead. Best-effort: the exit itself already succeeded, so
+# a failure to record this is not reported.
+record_deliberate_stop() {
+  fm_wake_status_append_self_announced "$STATE" "$STATE/$ID.status" \
+    "paused: stopped by firstmate (fm-control exit) - relaunch to resume" >/dev/null 2>&1 || true
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
@@ -450,6 +470,7 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      record_deliberate_stop
       printf 'already-stopped'
       return 0
       ;;
@@ -465,6 +486,7 @@ do_exit() {
       case "$state" in
         dead)
           retire_busy_incarnation
+          record_deliberate_stop
           printf 'stopped'
           return 0
           ;;
@@ -491,6 +513,7 @@ do_exit() {
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
+  record_deliberate_stop
   printf 'stopped'
 }
 

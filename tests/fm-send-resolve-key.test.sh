@@ -351,6 +351,32 @@ test_multiple_keys_close_together() {
   pass "fm-send --resolve-key: one answer closes each named key and only those"
 }
 
+# Answering an UNRELATED decision must not silently cancel a still-true
+# declared pause: fm-watch.sh's wedge detection is last-line-wins for a
+# paused: declaration (fm-classify-lib.sh's status_is_paused_or_captain_held),
+# so a closing resolved line that lands after a still-active pause would
+# otherwise become the file's newest line and end a wait it never touched.
+test_answer_reasserts_a_still_active_pause() {
+  local dir fb log home rc last
+  dir="$TMP_ROOT/reassert-pause"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home reassert-pause)
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  {
+    printf 'needs-decision [key=unrelated]: pick a fallback\n'
+    printf 'paused: waiting on the ci merge queue\n'
+  } > "$home/state/t7.status"
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key unrelated "use the default"; rc=$?
+  expect_code 0 "$rc" "an answer resolving an unrelated decision should succeed"
+  grep -F 'resolved [key=unrelated]: answered: use the default' "$home/state/t7.status" >/dev/null \
+    || fail "the closing resolved line is missing"
+  last=$(grep -v '^[[:space:]]*$' "$home/state/t7.status" | tail -1)
+  [ "$last" = 'paused: waiting on the ci merge queue' ] \
+    || fail "the still-active pause was not reasserted as the newest line: $(cat "$home/state/t7.status")"
+  pass "fm-send --resolve-key: answering an unrelated decision reasserts a still-active pause"
+}
+
 test_local_secondmate_answer_marked_and_closed() {
   local dir fb log home rc got out closing
   dir="$TMP_ROOT/sm"; mkdir -p "$dir"
@@ -544,6 +570,7 @@ test_not_open_key_refuses_before_send
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
+test_answer_reasserts_a_still_active_pause
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key

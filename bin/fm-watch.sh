@@ -838,6 +838,80 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
+# Bounded cadence for a stale pane whose only liveness evidence is a currently
+# active no-mistakes run step (crew_run_step_detail's run-step-working case:
+# review/fixing or ci monitoring). Such a step can legitimately stay quiet far
+# longer than STALE_ESCALATE_SECS - the ci step in particular is expected to
+# sit silent until a held PR merges - so this uses the SAME bounded
+# PAUSE_RESURFACE_SECS cadence handle_paused_stale uses for a declared
+# external wait, instead of the short wedge timer. Unlike a declared pause,
+# this liveness is firstmate's own inference rather than the crew's, so it
+# still re-verifies the run step at each bounded tick: crew_run_step_detail is
+# not cheap (its own header owns why), so that re-verification is throttled to
+# once per PAUSE_RESURFACE_SECS via .runstep-rechecked-<key>, never every
+# poll, exactly like handle_paused_stale's own agent_alive recheck window.
+# The reported detail text is tracked as a POSITION signature across those
+# bounded ticks: the SAME detail across FM_WEDGE_DEMAND_INSPECT_COUNT
+# consecutive ticks means the step is not merely quiet but not moving, and
+# escalates as a real wedge exactly like the ordinary timer's own
+# demand-deep-inspection ladder - "the step is quiet" and "the step is not
+# moving" stay distinguishable. A pane whose only 'working' evidence is a busy
+# PANE, not a run step, falls back to the ordinary wedge timer here (matching
+# its pre-existing short-timer behavior) rather than ever reaching this cadence.
+handle_run_step_stale() {  # <window> <task> <hash> [predetail]
+  local win=$1 task=$2 h=$3 key rf sigf sincef recheckf resf ewf detail age n reason
+  key=$(window_key "$win")
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rf="$STATE/.runstep-$key"
+  sigf="$STATE/.runstep-sig-$key"
+  sincef="$STATE/.runstep-since-$key"
+  recheckf="$STATE/.runstep-rechecked-$key"
+  resf="$STATE/.runstep-resurfaced-$key"
+  ewf="$STATE/.runstep-escalations-$key"
+  if [ -e "$rf" ] && [ "$(age_of "$recheckf")" -lt "$PAUSE_RESURFACE_SECS" ]; then
+    triage_log "absorbed run-step stale (within recheck window): $win"
+    return 0
+  fi
+  if [ "$#" -ge 4 ]; then
+    # Caller already confirmed run-step-working for this same task on this
+    # same poll (crew_absorb_class's with_detail form) and is handing us that
+    # detail directly, so this admission needs no second $FM_CREW_STATE_BIN
+    # read - only the throttled recheck ticks above re-verify via
+    # crew_run_step_detail below.
+    detail=$4
+  elif ! detail=$(crew_run_step_detail "$task"); then
+    # No longer confirmable as an active run step: drop this cadence and let
+    # the ordinary wedge timer judge it fresh from now, rather than from
+    # whenever this cadence first admitted the pane.
+    rm -f "$rf" "$sigf" "$sincef" "$recheckf" "$resf" "$ewf"
+    date +%s > "$STATE/.stale-since-$key"
+    clear_write_tracking "$key"
+    triage_log "run-step no longer confirmable, reverting to ordinary wedge timer: $win"
+    return 0
+  fi
+  : > "$rf"
+  date +%s > "$recheckf"
+  if [ "$(cat "$sigf" 2>/dev/null || true)" != "$detail" ]; then
+    printf '%s' "$detail" > "$sigf"
+    date +%s > "$sincef"
+    rm -f "$resf" "$ewf"
+    triage_log "absorbed run-step stale (progressed: $detail): $win"
+    return 0
+  fi
+  age=$(( $(date +%s) - $(cat "$sincef" 2>/dev/null || date +%s) ))
+  n=$(( $(cat "$ewf" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$ewf"
+  if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+    reason="stale: $win (run step unchanged for ${age}s: $detail, possible wedge, demand-deep-inspection: same run step reported no progress across $n rechecks - do not re-absorb on the run-step state alone)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    wake "$reason"
+    return 0
+  fi
+  reason="stale: $win (run step unchanged for ${age}s: $detail, rechecked on a long cadence not a wedge; confirm it is still progressing)"
+  resurface_absorbed "$win" "$resf" "$age" "$reason"
+  triage_log "absorbed run-step stale (quiet, verified still: $detail): $win"
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -900,9 +974,16 @@ clear_pause_state() {  # <window-key>
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
+clear_run_step_state() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.runstep-$key" "$STATE/.runstep-sig-$key" "$STATE/.runstep-since-$key" \
+    "$STATE/.runstep-rechecked-$key" "$STATE/.runstep-resurfaced-$key" "$STATE/.runstep-escalations-$key"
+}
+
 clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
+  clear_run_step_state "$key"
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
@@ -911,14 +992,20 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
-pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+# <with_detail>, when passed as any nonempty value, appends the same two
+# tab-separated source/detail fields crew_absorb_class's own with_detail form
+# does (both empty unless the printed class is 'working' via a run-step),
+# reusing whichever crew_absorb_class call below settled that class - so a
+# caller that turns a 'working' verdict straight into handle_run_step_stale
+# gets the run-step detail from that SAME read instead of a second one.
+pause_state_class() {  # <window> <task> [with_detail]
+  local win=$1 task=$2 with_detail=${3:-} key last recheck_file class src detail agent_alive kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    crew_absorb_class "$task" "$with_detail"
     return
   fi
   # Read once past the declared-wait gate and reused by both liveness gates below,
@@ -930,24 +1017,28 @@ pause_state_class() {  # <window> <task>
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
-        printf 'none'
+        printf 'none'; [ -z "$with_detail" ] || printf '\t\t'
         return
       fi
     fi
-    printf 'paused'
+    printf 'paused'; [ -z "$with_detail" ] || printf '\t\t'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  if [ -n "$with_detail" ]; then
+    IFS=$'\t' read -r class src detail <<<"$(crew_absorb_class "$task" 1)"
+  else
+    class=$(crew_absorb_class "$task")
+  fi
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
-    printf 'working'
+    printf 'working'; [ -z "$with_detail" ] || printf '\t%s\t%s' "$src" "$detail"
     return
   fi
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
-      printf 'none'
+      printf 'none'; [ -z "$with_detail" ] || printf '\t\t'
       return
     fi
   fi
@@ -965,6 +1056,7 @@ pause_state_class() {  # <window> <task>
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
+  [ -z "$with_detail" ] || printf '\t\t'
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
@@ -1793,6 +1885,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
+    rwf="$STATE/.runstep-$key"   # flag: this key's stale is using the bounded run-step cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
@@ -1832,12 +1925,19 @@ EOF
           # actively-running pipeline, purely because of this stale leftover
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
-          # over the log) a chance to override before trusting the log.
+          # over the log) a chance to override before trusting the log. An
+          # active RUN STEP (as opposed to a merely busy pane) gets the same
+          # bounded run-step cadence as the non-terminal path below, via
+          # handle_run_step_stale, rather than the short wedge timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
+            IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(crew_absorb_class "$task" 1)"
+            if [ "$crew_class" = working ]; then
               clear_write_tracking "$key"
+              if [ "$crew_src" = run-step ]; then
+                handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+              else
+                handle_run_step_stale "$w" "$task" "$h"
+              fi
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
@@ -1853,6 +1953,8 @@ EOF
               mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
               wake "stale: $w"
             fi
+          elif [ -e "$rwf" ]; then
+            handle_run_step_stale "$w" "$task" "$h"
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -1868,7 +1970,13 @@ EOF
           # Decided once per distinct stale hash (the costly state reads run only
           # on first sight, never every poll) via pause_state_class, which returns:
           #   - working: an actively-running pipeline legitimately sits on a static
-          #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
+          #     pane (e.g. waiting on CI). handle_run_step_stale applies the bounded
+          #     run-step cadence for a run-step-sourced 'working' (PAUSE_RESURFACE_SECS,
+          #     escalating only once the reported run-step position stops advancing
+          #     across successive bounded rechecks) rather than the short wedge timer,
+          #     since a legitimate wait here (e.g. a held PR merge) can outlast
+          #     STALE_ESCALATE_SECS by a wide margin; a pane-sourced 'working' (no
+          #     run step, just a busy pane) still falls back to the ordinary timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
@@ -1880,12 +1988,15 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(pause_state_class "$w" "$task" 1)"
+            case "$crew_class" in
               working)
                 clear_pause_tracking "$key"
-                printf '%s' "$h" > "$sf"
-                date +%s > "$ssf"
-                triage_log "absorbed non-terminal stale (provably working): $w"
+                if [ "$crew_src" = run-step ]; then
+                  handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+                else
+                  handle_run_step_stale "$w" "$task" "$h"
+                fi
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -1894,15 +2005,21 @@ EOF
                 surface_nonterminal_stale "$w" "$h"
                 ;;
             esac
+          elif [ -e "$rwf" ]; then
+            handle_run_step_stale "$w" "$task" "$h"
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(pause_state_class "$w" "$task" 1)"
+              case "$crew_class" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$key"
-                         printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
-                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                working) clear_pause_tracking "$key"
+                         if [ "$crew_src" = run-step ]; then
+                           handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+                         else
+                           handle_run_step_stale "$w" "$task" "$h"
+                         fi
+                         ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
@@ -1926,7 +2043,7 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_bound" -ne 0 ] && { [ -e "$pf" ] || [ -e "$rwf" ]; } && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1946,7 +2063,7 @@ EOF
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$key" ;;
         esac
-      elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
+      elif [ "$paused_bound" -ne 0 ] && { [ -e "$pf" ] || [ -e "$rwf" ]; }; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
         # declared-pause cadence recorded on this very poll.
         clear_pause_tracking "$key"
