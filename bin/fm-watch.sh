@@ -858,7 +858,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # moving" stay distinguishable. A pane whose only 'working' evidence is a busy
 # PANE, not a run step, falls back to the ordinary wedge timer here (matching
 # its pre-existing short-timer behavior) rather than ever reaching this cadence.
-handle_run_step_stale() {  # <window> <task> <hash>
+handle_run_step_stale() {  # <window> <task> <hash> [predetail]
   local win=$1 task=$2 h=$3 key rf sigf sincef recheckf resf ewf detail age n reason
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -872,7 +872,14 @@ handle_run_step_stale() {  # <window> <task> <hash>
     triage_log "absorbed run-step stale (within recheck window): $win"
     return 0
   fi
-  if ! detail=$(crew_run_step_detail "$task"); then
+  if [ "$#" -ge 4 ]; then
+    # Caller already confirmed run-step-working for this same task on this
+    # same poll (crew_absorb_class's with_detail form) and is handing us that
+    # detail directly, so this admission needs no second $FM_CREW_STATE_BIN
+    # read - only the throttled recheck ticks above re-verify via
+    # crew_run_step_detail below.
+    detail=$4
+  elif ! detail=$(crew_run_step_detail "$task"); then
     # No longer confirmable as an active run step: drop this cadence and let
     # the ordinary wedge timer judge it fresh from now, rather than from
     # whenever this cadence first admitted the pane.
@@ -985,14 +992,20 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
-pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+# <with_detail>, when passed as any nonempty value, appends the same two
+# tab-separated source/detail fields crew_absorb_class's own with_detail form
+# does (both empty unless the printed class is 'working' via a run-step),
+# reusing whichever crew_absorb_class call below settled that class - so a
+# caller that turns a 'working' verdict straight into handle_run_step_stale
+# gets the run-step detail from that SAME read instead of a second one.
+pause_state_class() {  # <window> <task> [with_detail]
+  local win=$1 task=$2 with_detail=${3:-} key last recheck_file class src detail agent_alive kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    crew_absorb_class "$task" "$with_detail"
     return
   fi
   # Read once past the declared-wait gate and reused by both liveness gates below,
@@ -1004,24 +1017,28 @@ pause_state_class() {  # <window> <task>
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
-        printf 'none'
+        printf 'none'; [ -z "$with_detail" ] || printf '\t\t'
         return
       fi
     fi
-    printf 'paused'
+    printf 'paused'; [ -z "$with_detail" ] || printf '\t\t'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  if [ -n "$with_detail" ]; then
+    IFS=$'\t' read -r class src detail <<<"$(crew_absorb_class "$task" 1)"
+  else
+    class=$(crew_absorb_class "$task")
+  fi
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
-    printf 'working'
+    printf 'working'; [ -z "$with_detail" ] || printf '\t%s\t%s' "$src" "$detail"
     return
   fi
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
-      printf 'none'
+      printf 'none'; [ -z "$with_detail" ] || printf '\t\t'
       return
     fi
   fi
@@ -1039,6 +1056,7 @@ pause_state_class() {  # <window> <task>
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
+  [ -z "$with_detail" ] || printf '\t\t'
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
@@ -1912,9 +1930,14 @@ EOF
           # bounded run-step cadence as the non-terminal path below, via
           # handle_run_step_stale, rather than the short wedge timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(crew_absorb_class "$task" 1)"
+            if [ "$crew_class" = working ]; then
               clear_write_tracking "$key"
-              handle_run_step_stale "$w" "$task" "$h"
+              if [ "$crew_src" = run-step ]; then
+                handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+              else
+                handle_run_step_stale "$w" "$task" "$h"
+              fi
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
@@ -1965,10 +1988,15 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(pause_state_class "$w" "$task" 1)"
+            case "$crew_class" in
               working)
                 clear_pause_tracking "$key"
-                handle_run_step_stale "$w" "$task" "$h"
+                if [ "$crew_src" = run-step ]; then
+                  handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+                else
+                  handle_run_step_stale "$w" "$task" "$h"
+                fi
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -1982,10 +2010,16 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(pause_state_class "$w" "$task" 1)"
+              case "$crew_class" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_tracking "$key"
-                         handle_run_step_stale "$w" "$task" "$h" ;;
+                         if [ "$crew_src" = run-step ]; then
+                           handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+                         else
+                           handle_run_step_stale "$w" "$task" "$h"
+                         fi
+                         ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else

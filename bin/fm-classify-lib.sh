@@ -1622,17 +1622,39 @@ _crew_state_line() {  # <id>
   return 0
 }
 
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  line=$(_crew_state_line "$id") || { printf 'none'; return; }
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+# <with_detail>, when passed as any nonempty value, appends two tab-separated
+# fields to the printed class: the source token ('run-step'/'pane', empty for
+# 'paused'/'none') and the run-step detail text (populated only when source is
+# 'run-step', empty otherwise) - the SAME single crew-state read this function
+# already makes, so a caller that needs to tell a run-step-sourced 'working'
+# apart from a pane-sourced one, and grab the run-step's detail text in that
+# same read, such as fm-watch.sh's handle_run_step_stale callers, can do so
+# without a second invocation of crew_run_step_detail (which would re-read
+# $FM_CREW_STATE_BIN). Omitting <with_detail> keeps the original single-token
+# contract exactly.
+crew_absorb_class() {  # <id> [with_detail]
+  local id=$1 with_detail=${2:-} line state rest src detail
+  line=$(_crew_state_line "$id") || { printf 'none'; [ -z "$with_detail" ] || printf '\t\t'; return; }
+  case "$line" in state:*) ;; *) printf 'none'; [ -z "$with_detail" ] || printf '\t\t'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = paused ]; then printf 'paused'; [ -z "$with_detail" ] || printf '\t\t'; return; fi
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    rest=${line#*source: }
+    src=${rest%% *}
+    case "$src" in
+      run-step)
+        printf 'working'
+        if [ -n "$with_detail" ]; then
+          detail=${rest#*" · "}
+          [ "$detail" != "$rest" ] || detail=""
+          printf '\t%s\t%s' "$src" "$detail"
+        fi
+        return
+        ;;
+      pane) printf 'working'; [ -z "$with_detail" ] || printf '\t%s\t' "$src"; return ;;
+    esac
   fi
-  printf 'none'
+  printf 'none'; [ -z "$with_detail" ] || printf '\t\t'
 }
 
 # The detail text behind crew_absorb_class's 'working' token, but ONLY for the
