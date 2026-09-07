@@ -440,12 +440,13 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    # Head equality, or the pipeline-owned-active exemption: while the
-    # pipeline owns this branch, the daemon's own branch attribution is
-    # authoritative and the lane head need not be a git object here
-    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+    # Head equality, or the actively-owned exemption: while branch_sync
+    # reports the pipeline itself as the reason local head and lane head
+    # disagree (pipeline_owned or behind), the daemon's own branch
+    # attribution is authoritative and the lane head need not be a git
+    # object here (fm_nm_run_is_actively_owned in bin/fm-nm-run-lib.sh).
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-      && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
+      && { nm_run_head_matches_worktree || fm_nm_run_is_actively_owned "$RUN_OUT"; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or its same-branch

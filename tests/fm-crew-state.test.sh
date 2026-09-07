@@ -1389,12 +1389,14 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
-# --- Run-attribution precedence for pipeline-owned lane heads ----------------
-# A live run whose pipeline OWNS the branch (branch_sync.state=pipeline_owned)
-# can report a lane head that is not a git object in the task worktree.
-# Every fixture head is deliberately unresolvable so only the top-level
-# branch_sync exemption - never an accidental nested-field match - attributes
-# the run.
+# --- Run-attribution precedence for pipeline-caused lane-head mismatches ----
+# A live run whose pipeline currently owns the branch (branch_sync.state=
+# pipeline_owned), or whose custody has already returned but the local
+# worktree has not fetched the pipeline's own push yet (branch_sync.state=
+# behind), can report a lane head that is not a git object in the task
+# worktree. Every fixture head is deliberately unresolvable so only the
+# top-level branch_sync exemption - never an accidental nested-field match -
+# attributes the run.
 run_running_pipeline_owned() {  # <branch> <head> [<sync-state>]
   cat <<EOF
 run:
@@ -1440,6 +1442,29 @@ EOF
   assert_contains "$out" "source: run-step" "pipeline-owned live run -> run-step source"
   assert_not_contains "$out" "state: failed" "superseded failed row must not surface over the live run"
   pass "pipeline-owned active run binds without head equality and beats the failed row"
+}
+
+# Head-divergence regression (2026-09 parked-checkpoint false positive): a
+# live run whose pipeline already returned custody, but whose own rebase/push
+# left the branch reading `behind` from the local worktree's point of view,
+# must bind exactly like the pipeline_owned case - not fall through to the
+# stale status log, which is what made a genuinely-running validation read
+# as parked.
+test_behind_active_run_binds_without_head_equality() {
+  reset_fakes
+  local d; d=$(new_case f10-behind)
+  make_repo_on_branch "$d/wt" fm/feat-f10f
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-f10f.meta" "window=fm:fm-feat-f10f" "worktree=$d/wt" "kind=ship"
+  printf 'done: implemented\n' > "$d/state/feat-f10f.status"
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10f f0f0f0f0 behind)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-f10f
+  local out; out=$(run_crew_state "$d" feat-f10f)
+  assert_contains "$out" "state: working" "a behind active run must still attribute -> working"
+  assert_contains "$out" "source: run-step" "behind active run -> run-step source"
+  pass "an active run reading behind binds without head equality, same as pipeline_owned"
 }
 
 # T1 direction 2: a genuinely-failed run with NO later run on the branch still
@@ -1489,8 +1514,10 @@ EOF
   pass "coarse scan stops on an unresolvable active row instead of binding an older one"
 }
 
-# Negative control: the exemption is gated on pipeline_owned specifically - any
-# other branch_sync state keeps the strict head rule.
+# Negative control: the exemption is gated on a pipeline-caused state
+# specifically (pipeline_owned or behind) - a state that claims full sync
+# (synced) has no pipeline-caused reason for a proven head mismatch, so it
+# keeps the strict head rule.
 test_non_pipeline_owned_unresolvable_head_not_attributed() {
   reset_fakes
   local d; d=$(new_case f10-not-owned)
@@ -1503,9 +1530,9 @@ test_non_pipeline_owned_unresolvable_head_not_attributed() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-f10d
   local out; out=$(run_crew_state "$d" feat-f10d)
-  assert_not_contains "$out" "source: run-step" "a non-pipeline-owned unresolvable head must not bind"
+  assert_not_contains "$out" "source: run-step" "a non-pipeline-caused unresolvable head must not bind"
   assert_contains "$out" "source: status-log" "falls back to the status log without the exemption"
-  pass "the exemption requires branch_sync.state=pipeline_owned"
+  pass "the exemption requires branch_sync.state=pipeline_owned or behind"
 }
 
 # Negative control: the exemption also requires an ACTIVE run - a terminal run
@@ -1601,6 +1628,7 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
+test_behind_active_run_binds_without_head_equality
 test_failed_run_with_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
