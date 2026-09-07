@@ -212,7 +212,7 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
-    assert_grep "keep polling its status within the same turn until it reaches" "$brief" \
+    assert_grep "never end a turn or arm a background monitor to wait" "$brief" \
       "$id: brief missing the in-turn pipeline-polling requirement"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
@@ -230,10 +230,12 @@ test_no_mistakes_dod_requires_in_turn_polling() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "fm-brief.sh $id --mode no-mistakes should exit 0"
   brief="$home/data/$id/brief.md"
-  assert_grep "Poll \`no-mistakes axi status\` in a loop within this same turn" "$brief" \
+  assert_grep "keep driving it in this same turn" "$brief" \
     "$id: Definition of done missing the in-turn pipeline-polling instruction"
-  assert_grep "not an external wait" "$brief" \
-    "$id: Definition of done does not say a running pipeline step is the worker's own work"
+  assert_grep "never end the turn or arm a background monitor, timer, or scheduled check" "$brief" \
+    "$id: Definition of done does not forbid arming a monitor for a live run"
+  assert_grep "There are exactly three points where you may end this turn while a run is active: an ask-user finding, a failed or cancelled outcome, or the \`ci\` return point below." "$brief" \
+    "$id: Definition of done must name the closed set of legitimate stopping points, not leave stopping to open-ended judgment"
   pass "fm-brief.sh: no-mistakes Definition of done requires in-turn pipeline polling"
 }
 
@@ -408,8 +410,10 @@ test_no_mistakes_dod_ci_return_point() {
     "no-mistakes DOD must name the still-monitoring-but-green return point"
   assert_grep "no CI checks reported - still monitoring until merged or closed\` - the repository has no CI configured, so nothing will ever arrive" "$brief" \
     "no-mistakes DOD must name the no-CI-configured return point and say nothing will arrive"
-  assert_grep "Do NOT treat \`no CI checks reported yet\` or \`CI checks running\` as that return point" "$brief" \
+  assert_grep "\`no CI checks reported yet\` and \`CI checks running\` satisfy none of the three" "$brief" \
     "no-mistakes DOD must distinguish CI merely slow to start from CI genuinely absent"
+  assert_grep "poll \`no-mistakes axi status\` again, in this same turn, not through a background monitor" "$brief" \
+    "no-mistakes DOD must forbid arming a monitor at the CI return-point check itself"
   assert_grep "Do NOT cancel or restart the run, do NOT merge or close the PR, and do NOT pass \`--yes\`" "$brief" \
     "no-mistakes DOD must forbid cancelling, merging, or --yes at the CI return point"
   pass "fm-brief.sh: no-mistakes DOD states all three CI return-point cases"
