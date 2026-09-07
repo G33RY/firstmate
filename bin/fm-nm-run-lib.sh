@@ -64,8 +64,8 @@ fm_nm_field() {  # <toon-output> <key>
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
-# fm_nm_run_is_pipeline_owned_active below carries the one exemption: a live
-# run whose pipeline currently owns the branch binds without head equality.
+# fm_nm_run_is_actively_owned below carries the exemptions: a live run whose
+# head mismatch is the pipeline's own doing binds without head equality.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   local wt=$1 run_head=$2 local_full run_full
   [ -n "$run_head" ] || return 1
@@ -109,16 +109,31 @@ fm_nm_run_is_active() {  # <toon-output>
   case "$status" in completed|failed|cancelled) return 1 ;; esac
 }
 
-# The one exemption to the head rule above: while the pipeline OWNS the branch
-# (branch_sync.state=pipeline_owned), the daemon's own branch attribution IS
-# the attribution for an ACTIVE run, and
-# head equality must not be required - the pipeline's lane head is routinely
-# not a git object in the task worktree (rebase and fix commits that were
-# never pushed back), so the head rule rejects exactly the run that is most
-# current. The exemption never applies to a terminal run: a terminal run has
-# released the branch, and binding one by branch name alone is the historical
-# reused-branch misattribution the head rule exists to prevent.
-fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
-  [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
+# The exemptions to the head rule above: while branch_sync reports the
+# pipeline as the reason the local worktree and the run's lane head disagree,
+# the daemon's own branch attribution IS the attribution for an ACTIVE run,
+# and head equality must not be required. Two states carry this reason:
+#   pipeline_owned - the pipeline currently holds custody mid-step (its lane
+#                     head is routinely not a git object in the task
+#                     worktree at all: rebase and fix commits never pushed
+#                     back);
+#   behind         - custody already returned but the local worktree has not
+#                     fetched the pipeline's own rebase/push yet, so the run
+#                     head is a real but locally-unresolvable descendant of
+#                     the worktree tip (see the 2026-09 parked-checkpoint
+#                     false-positive: a live pr/ci step reads as `behind`).
+# Both describe the SAME situation from the head rule's point of view - the
+# mismatch is the pipeline's own doing, not a foreign run - so both take the
+# exemption identically. The exemption never applies to a terminal run: a
+# terminal run has released the branch, and binding one by branch name alone
+# is the historical reused-branch misattribution the head rule exists to
+# prevent. It also never applies to any other branch_sync state (synced,
+# diverged, blocked_*, ...): those report no pipeline-caused reason for the
+# mismatch, so a proven head mismatch there stays a proven mismatch.
+fm_nm_run_is_actively_owned() {  # <toon-output>
+  case "$(fm_nm_branch_sync_state "$1")" in
+    pipeline_owned|behind) ;;
+    *) return 1 ;;
+  esac
   fm_nm_run_is_active "$1"
 }
