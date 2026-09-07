@@ -49,7 +49,9 @@ You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-Poll \`no-mistakes axi status\` in a loop within this same turn until it reaches a gate or a terminal outcome, then act on it - do not end the turn or arm a background monitor merely because a step is running; a running pipeline step is your own active work, not an external wait.
+
+There are exactly three points where you may end this turn while a run is active: an ask-user finding, a failed or cancelled outcome, or the \`ci\` return point below.
+Anywhere else, the run is your own active work - keep driving it in this same turn, and never end the turn or arm a background monitor, timer, or scheduled check to wait on it instead.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
@@ -59,12 +61,12 @@ Two firstmate-specific rules layer on top of that guidance:
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
 The \`ci\` step in \`axi status\` stays \`running\` until the PR merges or closes, by design - that alone is never still-waiting evidence.
-Once every other step reads \`completed\` and the PR is open, the return point is any of:
-- the top-level \`outcome\` field reads \`passed\` or \`checks-passed\`;
-- the \`ci\` row's \`active_steps[].last_activity\` text contains \`checks passed\`;
-- that \`last_activity\` text reads \`no CI checks reported - still monitoring until merged or closed\` - the repository has no CI configured, so nothing will ever arrive.
-Do NOT treat \`no CI checks reported yet\` or \`CI checks running\` as that return point - checks may still show up, so keep polling.
-On reaching the return point, append \`done: PR {url} checks green\` and stop. You are finished.
+Once every other step reads \`completed\` and the PR is open, check the \`ci\` row against these three cases before writing anything:
+- the top-level \`outcome\` field reads \`passed\` or \`checks-passed\`
+- the \`ci\` row's \`active_steps[].last_activity\` text contains \`checks passed\`
+- that \`last_activity\` text reads exactly \`no CI checks reported - still monitoring until merged or closed\` - the repository has no CI configured, so nothing will ever arrive
+\`no CI checks reported yet\` and \`CI checks running\` satisfy none of the three - poll \`no-mistakes axi status\` again, in this same turn, not through a background monitor.
+Only once one of the three matches verbatim: append \`done: PR {url} checks green\` and stop. You are finished.
 Do NOT cancel or restart the run, do NOT merge or close the PR, and do NOT pass \`--yes\`: the lingering monitor is harmless and ends when firstmate merges.
 EOF
       ;;

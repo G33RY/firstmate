@@ -435,10 +435,9 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   This includes a validation pipeline you started: it is your own active work, not an
-   external dependency, so keep polling its status within the same turn until it reaches
-   a gate or a terminal outcome, then act - never end a turn or arm a background monitor
-   merely because it is still running.
+   The same holds for any long-running step you started, such as a validation pipeline:
+   it is your own active work, so never end a turn or arm a background monitor to wait
+   on it instead - see Definition of done for the exact check that governs when you may stop.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window); a running pipeline step is not one. Firstmate then leaves your idle pane
