@@ -53,3 +53,21 @@ Never track it in project `.claude/settings.json`, which is Claude-only and prop
 
 On Claude 2.1.217 the tool presents as `Agent`, and both `Agent` and `Task` worked as deny keys in an A/B with nonsense control.
 `permissions.allow` pre-approves rather than controls availability, so no closed positive allowlist exists.
+
+### Per-spawn MCP and native-integration scoping
+
+`../../../bin/fm-tool-scope-lib.sh` consumes the facts below; it is the single owner of the spec syntax and the flags it generates.
+
+Verified 2026-09-08 on Claude Code 2.1.265, non-interactively (`claude -p ... "list the exact tool names available to you"`, output diffed across flag combinations):
+
+| Flag combination | Effect |
+|---|---|
+| (none) | Every registered MCP server (`mcpServers` in `~/.claude.json` or `$CLAUDE_CONFIG_DIR/.claude.json`, plus plugin-provided servers) connects; claude-in-chrome is absent in print mode without `--chrome`. |
+| `--chrome` | Adds the claude-in-chrome browser-control tools (`mcp__claude-in-chrome__*`) regardless of any other flag. |
+| `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` | Every registered server (mcp-atlassian, a caveman MCP server, a telegram plugin's MCP tools were all used as live test subjects) disappears; `--chrome` still independently adds claude-in-chrome under this same strict config, confirming the two axes compose rather than one overriding the other. |
+| `--strict-mcp-config --mcp-config <file>` naming only some servers | Only the named servers connect; every other registered or plugin-provided server is excluded. This is Claude's own documented closed positive allowlist ("Only use MCP servers from --mcp-config, ignoring all other MCP configurations" per `claude --help`). |
+
+Desktop control (the computer-use integration, `mcp__computer-use__*`) has **no discovered CLI or settings toggle** on this version: absent from `claude --help`, absent from `claude mcp list`, absent from `~/.claude/settings.json`.
+It never appeared in any print-mode probe above (including the unrestricted baseline), but print mode also excludes every other interactive-only tool (`AskUserQuestion`, `ExitPlanMode`, `Artifact*`, `EndConversation`, `SendUserFile`) regardless of flags, so its absence there is not evidence either way about interactive-mode gating - print mode simply cannot exercise this question.
+An interactive session (this skill's own launched crewmate sessions included) has computer-use available with no flag passed at all, so it is enabled by default in interactive mode whenever the underlying capability is reachable, with no confirmed way to suppress it from `fm-spawn.sh`.
+Treat this as a known, disclosed gap, not a solved case: `fm_tool_scope_prepare` does not attempt to gate it, and a future Claude Code version may expose a control worth wiring in here.

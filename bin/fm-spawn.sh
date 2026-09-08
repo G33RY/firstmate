@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tools <spec>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tools <spec>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tools <spec>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -38,6 +38,15 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --tools <spec> scopes which MCP servers and native integrations (issue
+#   trackers, browser control) the worker starts with; bin/fm-tool-scope-lib.sh
+#   owns the spec syntax and the verified per-flag facts. Verified only for the
+#   claude harness. Omitted, a ship or scout claude spawn defaults to the
+#   conservative "none" spec (zero extra servers, no browser control) and a
+#   secondmate claude spawn defaults to unrestricted "all"; every resolved
+#   effective spec is recorded as tools= in the task's meta regardless of
+#   harness. An explicit restrictive --tools on a harness with no implemented
+#   scoping is refused rather than silently ignored.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -303,6 +312,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-tool-scope-lib.sh
+. "$SCRIPT_DIR/fm-tool-scope-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -314,6 +325,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+TOOLS=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -321,6 +333,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+TOOLS_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -337,6 +350,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      tools) TOOLS=$a; TOOLS_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -356,6 +370,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --tools) want_value=tools ;;
+    --tools=*) TOOLS=${a#--tools=}; TOOLS_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -371,6 +387,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$TOOLS_SET" -eq 0 ] || [ -n "$TOOLS" ] || { echo "error: --tools requires a non-empty value; pass 'none' for the conservative default explicitly" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -1231,7 +1248,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __TOOLSFLAG____MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1542,6 +1559,38 @@ effort_flag_for_harness() {
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
   esac
+}
+
+# tools_effective_spec: resolves --tools plus harness/kind into the effective
+# spec string that both the recorded meta and the launch flags (via
+# bin/fm-tool-scope-lib.sh's fm_tool_scope_prepare) act on, so the two can
+# never disagree about what a worker was actually granted. Scoping is verified
+# only for the claude harness (see fm-tool-scope-lib.sh for the verified
+# per-flag facts); an explicit restrictive --tools on any other harness is
+# refused rather than silently ignored, so a captain relying on it never gets
+# an unrestricted worker without being told. A ship or scout claude spawn with
+# no --tools resolves to the conservative "none" spec (zero extra MCP servers,
+# no browser control); a secondmate claude spawn with no --tools stays
+# unrestricted ("all"), since secondmates are outside dispatch-profile scope
+# (docs/configuration.md "Crew dispatch profiles") and this task's brief is
+# about crewmate/scout tasks specifically.
+tools_effective_spec() {
+  local harness=$1 kind=$2 tools_set=$3 tools=$4
+  if [ "$harness" != claude ]; then
+    if [ "$tools_set" -eq 1 ] && [ "$tools" != all ]; then
+      echo "error: --tools is verified only for the claude harness; pass --tools all or omit it for harness '$harness'" >&2
+      return 1
+    fi
+    echo all
+    return 0
+  fi
+  if [ "$tools_set" -eq 1 ]; then
+    echo "$tools"
+  elif [ "$kind" = secondmate ]; then
+    echo all
+  else
+    echo none
+  fi
 }
 
 case "$LAUNCH" in
@@ -2827,6 +2876,7 @@ else
   fi
 fi
 
+TOOLS_EFFECTIVE=$(tools_effective_spec "$HARNESS" "$KIND" "$TOOLS_SET" "$TOOLS") || exit 1
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
@@ -2846,7 +2896,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort tools busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2864,6 +2914,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "tools=$TOOLS_EFFECTIVE"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2957,8 +3008,10 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+TOOLSFLAG=$(fm_tool_scope_prepare "$TOOLS_EFFECTIVE" "$STATE/$ID.mcp-scope.json") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__TOOLSFLAG__/$TOOLSFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
