@@ -194,8 +194,10 @@ grep -q -- '--tools) want_value=tools' "$ROOT/bin/fm-spawn.sh" \
   || fail "fm-spawn.sh must accept --tools on the command line"
 grep -q '__TOOLSFLAG__' "$ROOT/bin/fm-spawn.sh" \
   || fail "fm-spawn.sh's claude launch template must carry the __TOOLSFLAG__ placeholder"
+# shellcheck disable=SC2016
 grep -q 'fm_tool_scope_prepare "\$TOOLS_EFFECTIVE"' "$ROOT/bin/fm-spawn.sh" \
   || fail "fm-spawn.sh must resolve the launch flags through fm_tool_scope_prepare"
+# shellcheck disable=SC2016
 grep -q 'echo "tools=\$TOOLS_EFFECTIVE"' "$ROOT/bin/fm-spawn.sh" \
   || fail "fm-spawn.sh must record the effective --tools spec in task meta for traceability"
 pass "fm-spawn.sh wires --tools through fm_tool_scope_prepare into the claude launch template and task meta"
