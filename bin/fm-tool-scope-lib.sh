@@ -140,6 +140,10 @@ fm_tool_scope_prepare() {
     return 1
   fi
 
+  (umask 077 && : > "$scope_file") || {
+    echo "error: could not create scope file $scope_file" >&2
+    return 1
+  }
   if [ "${#names[@]}" -gt 0 ]; then
     [ -n "$config_path" ] || {
       echo "error: --tools names a server ('${names[0]}') but no claude MCP config was found to copy it from" >&2
@@ -154,7 +158,6 @@ fm_tool_scope_prepare() {
   else
     printf '{"mcpServers":{}}\n' > "$scope_file"
   fi
-  chmod 600 "$scope_file" 2>/dev/null || true
 
   if [ "$want_chrome" -eq 1 ]; then
     printf -- '--strict-mcp-config --mcp-config %s --chrome ' "$(shell_quote "$scope_file")"
