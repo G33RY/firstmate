@@ -41,6 +41,20 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
+# --admin-bypass is an explicit, opt-in flag: never a fallback, never automatic,
+# and never triggered by an ordinary refusal. It merges through the real gh
+# CLI with --admin instead of through gh-axi, because gh-axi's merge subcommand
+# exposes no such flag. GitHub-only: refused for a GitLab merge request. It is
+# refused up front when gh is not on PATH, and refused after a live read when
+# the base branch's enforce_admins protection is enabled, because that setting
+# means even an administrator cannot bypass required checks there; a base
+# branch with no classic protection rule has nothing to bypass and passes. It
+# changes what GitHub is asked to accept, never what this script believes: the
+# merged-or-queued outcome is still read back live afterward exactly as for an
+# ordinary merge. A merge gh accepts under --admin-bypass is recorded as
+# pr_admin_bypass=true in the task's metadata, so the landing is auditable
+# rather than looking like an ordinary green merge.
+#
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
@@ -63,7 +77,7 @@
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--admin-bypass] [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,6 +95,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -101,6 +117,11 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
+ADMIN_BYPASS=false
+if [ "${1:-}" = "--admin-bypass" ]; then
+  ADMIN_BYPASS=true
+  shift
+fi
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -187,6 +208,10 @@ reject_head_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+if [ "$ADMIN_BYPASS" = true ] && [ "$PROVIDER" != github ]; then
+  echo "error: --admin-bypass is only supported for GitHub pull requests" >&2
+  exit 1
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -208,6 +233,10 @@ if [ "$PROVIDER" = gitlab ]; then
     echo "error: merging a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
     exit 1
   fi
+fi
+if [ "$ADMIN_BYPASS" = true ] && ! command -v gh >/dev/null 2>&1; then
+  echo "error: an administrator bypass merge requires gh on PATH" >&2
+  exit 1
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
@@ -431,6 +460,37 @@ github_urlencode_path_segment() {
   printf '%s' "$encoded"
 }
 
+# Live gate for --admin-bypass, called only after gh on PATH is already
+# confirmed. Refuses when the base branch's enforce_admins protection is
+# enabled, since that setting means an administrator genuinely cannot bypass
+# required checks there; a base branch with no classic protection rule at all
+# has nothing to bypass and passes.
+github_admin_bypass_precheck() {
+  local base enc enabled output
+  if ! base=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --json baseRefName --jq '.baseRefName' 2>/dev/null) || [ -z "$base" ]; then
+    echo "error: could not read the pull request's base branch to verify an administrator bypass is available" >&2
+    return 1
+  fi
+  enc=$(github_urlencode_path_segment "$base")
+  if enabled=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc/protection/enforce_admins" \
+    --jq '.enabled' 2>/dev/null); then
+    if [ "$enabled" = true ]; then
+      echo "error: base branch $base enforces branch protection rules for administrators (enforce_admins is enabled); an administrator bypass is not available" >&2
+      return 1
+    fi
+    return 0
+  fi
+  output=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc/protection/enforce_admins" 2>&1 >/dev/null)
+  case "$output" in
+    *'(HTTP 404)'*) return 0 ;;
+    *)
+      echo "error: could not read branch protection state for $base to verify an administrator bypass is available" >&2
+      return 1
+      ;;
+  esac
+}
+
 # Read the effective merge-queue method for the observed base branch. The four
 # situations the refusal has to keep apart - no queue rule, a rules response
 # that could not be read, several rules that disagree, and a rule whose method
@@ -500,6 +560,33 @@ record_pr_metadata() {
     echo "error: PR metadata recording failed" >&2
     return 1
   }
+}
+
+# Records that a merge gh already accepted used --admin-bypass, so the landing
+# is auditable afterward. Never a prerequisite for the merge itself: called
+# only once gh has accepted the request.
+record_admin_bypass_marker() {
+  local lock tmp device line
+  lock=$(fm_meta_lock_path "$META") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  device=$(fm_pr_file_device "$META") || { fm_lock_release "$lock"; return 1; }
+  tmp=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr_admin_bypass=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
+    esac
+  done < "$META"
+  printf 'pr_admin_bypass=true\n' >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  fm_pr_private_file_valid "$tmp" 600 "$device" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$META" "$device" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  mv -f -- "$tmp" "$META" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  fm_lock_release "$lock"
 }
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
@@ -632,16 +719,26 @@ case "$PROVIDER" in
   github)
     merge_output=
     merge_args=()
+    if [ "$ADMIN_BYPASS" = true ]; then
+      github_admin_bypass_precheck || exit 1
+      merge_args+=(--admin)
+    fi
     if ! caller_has_merge_method "$@"; then
-      merge_args=(--squash)
+      merge_args+=(--squash)
     fi
     if caller_requested_auto_merge "$@"; then
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    merge_cmd=(gh-axi pr merge)
+    [ "$ADMIN_BYPASS" != true ] || merge_cmd=(gh pr merge)
+    if merge_output=$("${merge_cmd[@]}" "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
+      if [ "$ADMIN_BYPASS" = true ] && ! record_admin_bypass_marker; then
+        printf 'actionable: %s was merged with an administrator bypass, but that could not be recorded in task metadata\n' \
+          "$URL" >&2
+      fi
     else
       merge_status=$?
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
