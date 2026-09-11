@@ -68,6 +68,12 @@
 #   (av) a base branch with no queue rule says nothing about a merge queue
 #   (aw) a refusal built on the gh-axi view says the merge queue could not be
 #       observed, and judges that view's state like the queue-aware one
+#   (ax) --admin-bypass merges through gh --admin, verified live like an
+#       ordinary merge, and records the bypass in task metadata
+#   (ay) --admin-bypass refuses before merging when enforce_admins is enabled
+#   (az) --admin-bypass proceeds on a base branch with no classic protection
+#   (ba) --admin-bypass refuses before recording anything when gh is absent
+#   (bb) --admin-bypass refuses outright for a GitLab merge request
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -221,6 +227,77 @@ case "${1:-} ${2:-}" in
   "pr view") exit 1 ;;
 esac
 exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# gh mock for --admin-bypass cases: answers the base-branch lookup, the
+# enforce_admins read for the requested <mode> (allowed, enforced, unprotected,
+# unreadable), the graphql outcome read from the case's github-outcome
+# fixture, and an admin merge itself. Args: case_dir base mode
+add_admin_bypass_gh_mock() {
+  local case_dir=$1 base=$2 mode=$3
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *baseRefName*) printf '%s\n' '$base' ; exit 0 ;;
+    esac
+    exit 1
+    ;;
+  "pr merge")
+    printf 'merged:\n  number: %s\n  status: ok\n' "\${3:-}"
+    exit 0
+    ;;
+  "api graphql")
+    cat "\$FM_TEST_GH_OUTCOME"
+    exit 0
+    ;;
+esac
+if [ "\${1:-}" = "api" ]; then
+  case " \$* " in
+    *enforce_admins*)
+      case " \$* " in
+        *--jq*)
+          case "$mode" in
+            allowed) echo false ; exit 0 ;;
+            enforced) echo true ; exit 0 ;;
+            *) exit 1 ;;
+          esac
+          ;;
+        *)
+          case "$mode" in
+            unprotected)
+              echo '{"message":"Branch not protected"}'
+              echo 'gh: Branch not protected (HTTP 404)' >&2
+              exit 1
+              ;;
+            unreadable) echo 'gh: server error (HTTP 500)' >&2 ; exit 1 ;;
+            *) exit 1 ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+  cat "\$FM_TEST_GH_RULES"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# gh-axi mock that fails loudly if invoked, so a case can prove --admin-bypass
+# never reaches gh-axi's merge subcommand, which exposes no --admin flag.
+add_gh_axi_refuses_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+echo "error: gh-axi must not be used for an administrator bypass merge" >&2
+exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
@@ -2072,6 +2149,143 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+# --admin-bypass merges through gh --admin, verified live exactly like an
+# ordinary merge, and records the bypass in task metadata.
+test_admin_bypass_merges_when_allowed() {
+  local case_dir rc url
+  url=https://github.com/example/repo/pull/70
+  case_dir=$(make_case admin-bypass-allowed)
+  add_admin_bypass_gh_mock "$case_dir" main allowed
+  add_gh_axi_refuses_mock "$case_dir"
+  : > "$case_dir/gh.log"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --admin-bypass \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "admin-bypass-allowed: a confirmed bypass merge must succeed"
+  assert_grep 'verified:' "$case_dir/stdout" \
+    "admin-bypass-allowed: the merge was not verified"
+  assert_grep '--admin' "$case_dir/gh.log" \
+    "admin-bypass-allowed: gh was not asked to merge with --admin"
+  assert_grep 'pr_admin_bypass=true' "$case_dir/state/task-x1.meta" \
+    "admin-bypass-allowed: the bypass was not recorded in task metadata"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "admin-bypass-allowed: gh-axi was invoked for an administrator bypass merge"
+  pass "fm-pr-merge merges a GitHub pull request with a caller-requested administrator bypass, verified live and recorded in task metadata"
+}
+
+# enforce_admins enabled means even an administrator cannot bypass required
+# checks, so the bypass must refuse before any merge is attempted.
+test_admin_bypass_refuses_when_enforced() {
+  local case_dir rc url
+  url=https://github.com/example/repo/pull/71
+  case_dir=$(make_case admin-bypass-enforced)
+  add_admin_bypass_gh_mock "$case_dir" main enforced
+  add_gh_axi_refuses_mock "$case_dir"
+  : > "$case_dir/gh.log"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --admin-bypass \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "admin-bypass-enforced: an enforced base branch must refuse the bypass"
+  assert_grep 'enforce_admins is enabled' "$case_dir/stderr" \
+    "admin-bypass-enforced: the refusal did not name enforce_admins"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "admin-bypass-enforced: gh was asked to merge despite the refusal"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "admin-bypass-enforced: gh-axi was invoked despite the refusal"
+  assert_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+    "admin-bypass-enforced: the PR was not recorded even though the bypass was refused"
+  pass "fm-pr-merge refuses an administrator bypass when the base branch's enforce_admins protection is enabled"
+}
+
+# A base branch with no classic protection rule at all has nothing to bypass,
+# so the caller-requested bypass merge still proceeds.
+test_admin_bypass_allows_unprotected_branch() {
+  local case_dir rc url
+  url=https://github.com/example/repo/pull/74
+  case_dir=$(make_case admin-bypass-unprotected)
+  add_admin_bypass_gh_mock "$case_dir" main unprotected
+  add_gh_axi_refuses_mock "$case_dir"
+  : > "$case_dir/gh.log"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --admin-bypass \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "admin-bypass-unprotected: a base branch with no classic protection has nothing to bypass"
+  assert_grep 'verified:' "$case_dir/stdout" \
+    "admin-bypass-unprotected: the merge was not verified"
+  assert_grep 'pr_admin_bypass=true' "$case_dir/state/task-x1.meta" \
+    "admin-bypass-unprotected: the bypass was not recorded in task metadata"
+  pass "fm-pr-merge allows an administrator bypass merge on a base branch with no classic branch protection"
+}
+
+# No gh on PATH means the bypass is genuinely impossible, so it must refuse
+# before anything is recorded rather than falling back to an ordinary merge.
+test_admin_bypass_requires_gh() {
+  local case_dir rc url ghless_path
+  url=https://github.com/example/repo/pull/72
+  case_dir=$(make_case admin-bypass-no-gh)
+  add_admin_bypass_gh_mock "$case_dir" main allowed
+  add_gh_axi_refuses_mock "$case_dir"
+  rm "$case_dir/fakebin/gh"
+  ghless_path="$case_dir/path-without-gh"
+  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 "$url" --admin-bypass \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "admin-bypass-no-gh: a bypass request with no gh on PATH must refuse"
+  assert_grep 'requires gh on PATH' "$case_dir/stderr" \
+    "admin-bypass-no-gh: the refusal did not name the missing gh"
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+    "admin-bypass-no-gh: the PR was recorded before the missing-gh refusal"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "admin-bypass-no-gh: gh-axi was invoked despite the refusal"
+  pass "fm-pr-merge refuses an administrator bypass merge before recording anything when gh is not on PATH"
+}
+
+# --admin-bypass has no GitLab equivalent in this script, so it must refuse
+# outright rather than attempting anything against a merge request.
+test_admin_bypass_refuses_for_gitlab() {
+  local case_dir rc url
+  case_dir=$(make_gitlab_case admin-bypass-gitlab)
+  url=$MR_URL
+  : > "$case_dir/glab.log"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --admin-bypass \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "admin-bypass-gitlab: administrator bypass must refuse for a GitLab merge request"
+  assert_grep 'only supported for GitHub' "$case_dir/stderr" \
+    "admin-bypass-gitlab: the refusal did not explain the GitHub-only scope"
+  [ ! -s "$case_dir/glab.log" ] \
+    || fail "admin-bypass-gitlab: glab was invoked despite the refusal"
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+    "admin-bypass-gitlab: the merge request was recorded before the scope refusal"
+  pass "fm-pr-merge refuses an administrator bypass for a GitLab merge request before recording anything"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -2133,3 +2347,8 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_admin_bypass_merges_when_allowed
+test_admin_bypass_refuses_when_enforced
+test_admin_bypass_allows_unprotected_branch
+test_admin_bypass_requires_gh
+test_admin_bypass_refuses_for_gitlab
