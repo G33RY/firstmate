@@ -44,7 +44,9 @@
 # --admin-bypass is an explicit, opt-in flag: never a fallback, never automatic,
 # and never triggered by an ordinary refusal. It merges through the real gh
 # CLI with --admin instead of through gh-axi, because gh-axi's merge subcommand
-# exposes no such flag. GitHub-only: refused for a GitLab merge request. It is
+# exposes no such flag. Real gh has no --method flag either, so a caller's
+# --method/--method=<value> is translated to -s/-m/-r before forwarding to it.
+# GitHub-only: refused for a GitLab merge request. It is
 # refused up front when gh is not on PATH, and refused after a live read when
 # the base branch's enforce_admins protection is enabled, because that setting
 # means even an administrator cannot bypass required checks there; a base
@@ -153,6 +155,34 @@ caller_merge_method() {
     esac
   done
   printf '%s' "$method"
+}
+
+# Real gh has no --method flag (only -m/--merge, -s/--squash, -r/--rebase), so
+# --admin-bypass must translate the caller's --method/--method=<value> forms
+# before forwarding to it; gh-axi's own path accepts --method as-is and never
+# calls this. Sets the global admin_bypass_translated array.
+translate_caller_method_for_gh() {
+  local arg pending=false
+  admin_bypass_translated=()
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      pending=false
+      case "$arg" in
+        squash) admin_bypass_translated+=(--squash) ;;
+        merge) admin_bypass_translated+=(--merge) ;;
+        rebase) admin_bypass_translated+=(--rebase) ;;
+        *) admin_bypass_translated+=(--method "$arg") ;;
+      esac
+      continue
+    fi
+    case "$arg" in
+      --method) pending=true ;;
+      --method=squash) admin_bypass_translated+=(--squash) ;;
+      --method=merge) admin_bypass_translated+=(--merge) ;;
+      --method=rebase) admin_bypass_translated+=(--rebase) ;;
+      *) admin_bypass_translated+=("$arg") ;;
+    esac
+  done
 }
 
 # Whether the caller's own extra arguments asked for auto-merge, including the
@@ -731,9 +761,15 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     merge_cmd=(gh-axi pr merge)
-    [ "$ADMIN_BYPASS" != true ] || merge_cmd=(gh pr merge)
+    forwarded_args=("$@")
+    if [ "$ADMIN_BYPASS" = true ]; then
+      merge_cmd=(gh pr merge)
+      translate_caller_method_for_gh "$@"
+      forwarded_args=("${admin_bypass_translated[@]+"${admin_bypass_translated[@]}"}")
+    fi
     if merge_output=$("${merge_cmd[@]}" "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
+      "${merge_args[@]+"${merge_args[@]}"}" \
+      "${forwarded_args[@]+"${forwarded_args[@]}"}" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       if [ "$ADMIN_BYPASS" = true ] && ! record_admin_bypass_marker; then
         printf 'actionable: %s was merged with an administrator bypass, but that could not be recorded in task metadata\n' \
