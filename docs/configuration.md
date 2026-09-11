@@ -350,7 +350,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, `--effort`, and `--tools` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -363,13 +363,13 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "tools": "<optional --tools spec>" }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "tools": "<optional --tools spec>" }
   ]
 }
 ```
@@ -377,8 +377,9 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+Profile `model`, `effort`, and `tools` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
+An omitted `tools` means the spawn's own default applies (see "Per-spawn tool scoping" below); a rule that names it passes the value straight through to `fm-spawn.sh --tools`.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
@@ -388,6 +389,17 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+### Per-spawn tool scoping (--tools)
+
+A spawned worker inherits every MCP server and native integration the operator has configured unless scoped down: each one's tool definitions cost context on every turn regardless of whether the task ever uses them.
+`bin/fm-tool-scope-lib.sh` is the single owner of the `--tools` spec syntax and the verified per-flag facts (which Claude Code CLI flags actually control which integration, and on what version); this section owns only where the choice is expressed and the default.
+A ship or scout claude spawn with no `--tools` (and no profile `tools` field) defaults to the conservative spec: zero extra MCP servers and browser control off, so a worker starts able to read, edit, run Bash, and drive `no-mistakes`/`gh-axi`/`chrome-devtools-axi`/`lavish-axi` (all Bash-invoked CLIs, unaffected by this scoping) but nothing configured beyond that.
+A secondmate claude spawn defaults to unrestricted, since secondmates are outside dispatch-profile scope (see above) and carry a broader, persistent charter.
+A task that needs more names it explicitly, either via a dispatch profile's `tools` field or a direct `--tools` flag at intake: a comma-separated list of `chrome` and/or the exact server names `fm_tool_scope_catalog` reports from the operator's own MCP config, or the literal `all` to opt out of scoping entirely.
+Every resolved effective spec is recorded as `tools=` in the task's meta regardless of harness, so what a worker was actually granted is always inspectable without re-deriving it.
+Tool scoping is verified only for the claude harness; an explicit restrictive `--tools` on any other harness is refused rather than silently ignored.
+A worker that hits a genuine gap - a needed server it was not granted - reports that plainly (per its brief) rather than presenting as an unexplained inability; firstmate relaunches it with a wider `--tools` spec, no script edit required.
 
 ## Toolchain
 

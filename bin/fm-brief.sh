@@ -362,6 +362,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. You start with only the MCP servers and integrations this task was judged to need; that is
+   deliberate, not an oversight. If a genuinely needed one is missing, that is a scoping gap, not
+   your own incapacity: append \`needs-decision: missing tool <name>, needed because <why>\`
+   naming the exact server or capability rather than working around its absence, and firstmate
+   will relaunch you with it granted.
 
 $INBOX_SECTION
 
@@ -451,6 +456,11 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. You start with only the MCP servers and integrations this task was judged to need; that is
+   deliberate, not an oversight. If a genuinely needed one is missing, that is a scoping gap, not
+   your own incapacity: append \`needs-decision: missing tool <name>, needed because <why>\`
+   naming the exact server or capability rather than working around its absence, and firstmate
+   will relaunch you with it granted.
 
 $INBOX_SECTION
 

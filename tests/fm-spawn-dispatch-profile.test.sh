@@ -119,7 +119,7 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch scope_file
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -129,11 +129,15 @@ test_no_profile_keeps_claude_profile_defaults() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_grep "tools=none" "$HOME_DIR/state/$id.meta" "meta missing tools=none"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  scope_file="$HOME_DIR/state/$id.mcp-scope.json"
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --strict-mcp-config --mcp-config '$scope_file' --no-chrome \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  [ "$(cat "$scope_file")" = '{"mcpServers":{}}' ] \
+    || fail "the conservative default scope file must grant zero MCP servers, got: $(cat "$scope_file" 2>/dev/null)"
+  pass "no --model/--effort records defaults and the claude launch conservatively scopes MCP servers and browser control off"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -385,7 +389,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
 }
 
 test_claude_threads_model_and_effort() {
-  local rec id out status launch
+  local rec id out status launch scope_file
   id=profile-claude-z2
   rec=$(make_spawn_case profile-claude claude "$id")
   read_case_record "$rec"
@@ -395,8 +399,9 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
-    "claude launch did not thread model and effort flags"
+  scope_file="$HOME_DIR/state/$id.mcp-scope.json"
+  assert_contains "$launch" "claude --dangerously-skip-permissions --strict-mcp-config --mcp-config '$scope_file' --no-chrome --model 'sonnet' --effort 'high'" \
+    "claude launch did not thread model and effort flags after the conservative default tool scope"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
 }
