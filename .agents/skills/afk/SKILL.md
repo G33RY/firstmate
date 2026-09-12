@@ -222,7 +222,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `FM_SUPERVISOR_BACKEND` if not tmux) to firstmate's own pane before entering
   away mode.
   An auto-discovered target (from `$TMUX_PANE` or `$HERDR_PANE_ID`) also has to
-  prove it is a firstmate pane before the daemon trusts it: `fm_backend_agent_state`
+  prove it is a firstmate pane before the daemon trusts it: `fm_backend_foreground_agent_state`
   must not read a confident `dead` (a foreground process group that is nothing
   but a shell).
   A resolved-but-empty auto-discovered pane refuses exactly like an
