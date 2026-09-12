@@ -71,10 +71,18 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
-#                                   tmux target or a herdr "<session>:<pane-id>"
-#                                   target; which one it's read as is decided by
+#                                   $HERDR_PANE_ID under herdr). No further
+#                                   fallback: an unresolvable target refuses at
+#                                   startup instead of guessing firstmate:0, and
+#                                   an auto-discovered target that resolves to a
+#                                   bare shell (no verified agent process)
+#                                   refuses too - away mode requires firstmate
+#                                   itself to be running inside a tracked tmux
+#                                   or herdr pane. An explicit override is
+#                                   trusted as-is and skips that agent-process
+#                                   proof. Accepts either a tmux target or a
+#                                   herdr "<session>:<pane-id>" target; which
+#                                   one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
 #          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
 #                                   override; otherwise auto-discovered the same
@@ -1562,9 +1570,12 @@ fm_super_main() {
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>"). An unresolvable
+  # pane is a startup failure, not a firstmate:0 guess (`.agents/skills/afk/SKILL.md`
+  # "Injection hardening" owns why: away mode needs firstmate running inside a
+  # tracked pane). Exporting the result into FM_SUPERVISOR_TARGET makes
+  # inject_msg (which reads that env var) use the resolved pane without an
+  # extra global.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
@@ -1572,14 +1583,14 @@ fm_super_main() {
       target_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
-    else
-      target_source="FALLBACK(firstmate:0)"
     fi
   fi
-  if discovered=$(discover_supervisor_target); then
-    : # resolved cleanly
-  else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+  if ! discovered=$(discover_supervisor_target); then
+    echo "error: could not resolve firstmate's own supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); away mode requires firstmate to run inside a tracked tmux or herdr pane - either run firstmate that way, or set FM_SUPERVISOR_TARGET (and FM_SUPERVISOR_BACKEND) to firstmate's own pane before starting away mode" >&2
+    log "startup failed: supervisor pane unresolvable (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
@@ -1592,6 +1603,33 @@ fm_super_main() {
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
+
+  # --- prove an AUTO-DISCOVERED target is a firstmate pane, not a bare shell -
+  # A pane can exist (the check above) while running nothing but an idle shell
+  # in it - exactly how a stray "firstmate:0" used to pass the old check and
+  # swallow every escalation silently. fm_backend_foreground_agent_state
+  # (bin/fm-backend.sh) reuses the same recovery-grade agent classifier
+  # fm-crew-state.sh relies on for recorded task endpoints (AGENTS.md section
+  # 4's harness-verification discipline), but accepts a bare pane id too - the
+  # literal shape of an inherited $TMUX_PANE - so an auto-discovered
+  # "supervisor pane" means a verified harness agent, not merely a pane that
+  # happens to exist. Only the confident negative ("dead": the foreground
+  # process group is nothing but a shell) refuses; every other verdict
+  # (ambiguous, unreadable, unverified) stays inconclusive and is let through
+  # rather than blocking a legitimate pane this classifier cannot read,
+  # matching fm_backend_agent_alive's fail-open-on-uncertainty contract
+  # elsewhere. An explicit FM_SUPERVISOR_TARGET override is exempt: it is the
+  # captain's own deliberate escape hatch (including for a harness or test
+  # fixture this classifier does not recognize), and second-guessing it would
+  # leave no way to supervise through a pane the classifier misreads.
+  if [ "$target_source" != "FM_SUPERVISOR_TARGET" ] \
+     && [ "$(fm_backend_foreground_agent_state "$BACKEND" "$TARGET")" = "dead" ]; then
+    echo "error: auto-discovered supervisor target '$TARGET' (source=$target_source) is a bare shell, not a firstmate pane; set FM_SUPERVISOR_TARGET explicitly to the pane firstmate itself is running in" >&2
+    log "startup failed: target '$TARGET' has no agent process (backend=$BACKEND, source=$target_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
