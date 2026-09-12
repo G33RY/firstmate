@@ -202,19 +202,39 @@ the operational prefix lets firstmate distinguish it from a real captain message
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - all three paths use the shared status presentation markers defined by `bin/fm-classify-lib.sh`, so a successfully classified span is not re-escalated by another path in the same digest.
   Never treat a reported unreadable state as classified; the shared library header owns that marker contract, and the marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
-- **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
-  (tmux vs herdr) and TARGET independently, mirroring
+- **Auto-discovered supervisor pane, or a loud refusal** - the daemon resolves
+  its own BACKEND (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
   override, then `$TMUX_PANE` set (tmux), then `$HERDR_ENV=1` with
   `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
   `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
   `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
-  backends, including zellij, orca, and cmux, are not yet supported as
-  supervisor backends; the daemon refuses loudly at startup instead of
-  misapplying tmux primitives to a pane that isn't one
+  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr. Both resolution
+  sources are logged at startup.
+  There is no `firstmate:0` guess when none of those resolve: an unresolvable
+  target refuses loudly at startup instead of silently injecting escalations
+  into whatever (or nothing) happens to sit at that name, the same way an
+  unsupported backend already refuses.
+  Away mode therefore requires firstmate itself to be running inside a tracked
+  tmux or herdr pane - a plain terminal window with no `TMUX`/`TMUX_PANE` and no
+  `HERDR_ENV`/`HERDR_PANE_ID` cannot be auto-discovered.
+  Start firstmate inside tmux or herdr, or set `FM_SUPERVISOR_TARGET` (and
+  `FM_SUPERVISOR_BACKEND` if not tmux) to firstmate's own pane before entering
+  away mode.
+  An auto-discovered target (from `$TMUX_PANE` or `$HERDR_PANE_ID`) also has to
+  prove it is a firstmate pane before the daemon trusts it: `fm_backend_agent_state`
+  must not read a confident `dead` (a foreground process group that is nothing
+  but a shell).
+  A resolved-but-empty auto-discovered pane refuses exactly like an
+  unresolvable one, so a stale inherited `TMUX_PANE` pointing at an idle shell
+  can never silently swallow every escalation the way the old `firstmate:0`
+  fallback could.
+  An explicit `FM_SUPERVISOR_TARGET` override skips this proof - it is the
+  captain's own deliberate escape hatch, including for a harness or test
+  fixture the classifier does not recognize.
+  Other runtime backends, including zellij, orca, and cmux, are not yet
+  supported as supervisor backends; the daemon refuses loudly at startup
+  instead of misapplying tmux primitives to a pane that isn't one
   (docs/herdr-backend.md "Away-mode supervisor support").
 
 ## Stale-artifact lifecycle
