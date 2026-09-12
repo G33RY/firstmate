@@ -906,6 +906,30 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_foreground_agent_state: the same alive/dead/ambiguous/unreadable
+# vocabulary as fm_backend_agent_state, for a caller that has ALREADY proven
+# the target pane exists (e.g. via fm_backend_target_exists) and only needs the
+# live foreground verdict - never `missing`, and never a `unverified` inventory
+# proof the target's naming convention cannot satisfy.
+# This matters specifically for tmux: fm_backend_tmux_agent_state requires
+# firstmate's own "<session>:<window-name>" recorded-target shape so it can
+# defend against tmux silently falling back to the active window when a named
+# target is absent. A bare tmux pane id (`%37`, the literal shape of a live
+# process's own $TMUX_PANE) has no window name to inventory-check and would
+# always read `unreadable` through that path even when the pane plainly exists
+# and is readable, so this dispatches tmux to the lower-level
+# fm_backend_tmux_foreground_agent_state instead. Herdr's composed
+# "<session>:<pane-id>" target already matches what its own classifier expects
+# regardless of source, so it reuses fm_backend_agent_state unchanged.
+fm_backend_foreground_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_foreground_agent_state "$target" ;;
+    *) fm_backend_agent_state "$backend" "$target" ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

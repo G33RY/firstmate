@@ -246,15 +246,15 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
-# recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
-# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
-# the empirical basis. Tmux silently falls back to the active window when a
-# named target is absent, so the exact recorded window must appear in a
-# successful session inventory before its foreground command can be trusted.
-# An omitted window or a definitive missing-session/server response is
-# `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate.
+# fm_backend_tmux_foreground_agent_state: the agent/shell/ambiguous verdict for
+# a target's live foreground process group, given that the target is already
+# known to address a real pane (the caller has proven that separately - see
+# fm_backend_tmux_agent_state below for the recorded-window case, or
+# fm_backend_target_exists for a cheaper existence-only proof). Never returns
+# `missing`: that verdict is about proving existence, which is not this
+# function's job, so it accepts ANY tmux target syntax the pane read primitives
+# accept, including a bare pane id (`%37`, e.g. a live process's own $TMUX_PANE)
+# that carries no session/window name to inventory-check.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -262,36 +262,8 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
-  case "$target" in
-    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
-    *) printf 'unreadable'; return 0 ;;
-  esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
-    esac
-    return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
-  fi
+fm_backend_tmux_foreground_agent_state() {  # <target> -> alive|dead|ambiguous|unreadable
+  local target=$1 comm foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
@@ -344,6 +316,51 @@ EOF
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
+}
+
+# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
+# RECORDED target (firstmate's own "<session>:<window-name>" convention). See
+# bin/fm-backend.sh's fm_backend_agent_state for the shared state vocabulary
+# and docs/tmux-backend.md "Agent liveness probe" for the empirical basis. Tmux
+# silently falls back to the active window when a named target is absent, so
+# the exact recorded window must appear in a successful session inventory
+# before its foreground command can be trusted - this inventory proof is what
+# distinguishes this function from fm_backend_tmux_foreground_agent_state
+# above, which this delegates to once existence is proven. An omitted window or
+# a definitive missing-session/server response is `missing`; any other
+# inventory read failure is `unreadable`, so a transient tmux problem never
+# licenses a duplicate.
+fm_backend_tmux_agent_state() {  # <target>
+  local target=$1 session window windows inventory_status
+  case "$target" in
+    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
+    *:*) ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+    inventory_status=0
+  else
+    inventory_status=$?
+  fi
+  if [ "$inventory_status" -ne 0 ]; then
+    case "$windows" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        printf 'missing'
+        ;;
+      *)
+        printf 'unreadable'
+        ;;
+    esac
+    return 0
+  fi
+  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+    printf 'missing'
+    return 0
+  fi
+
+  fm_backend_tmux_foreground_agent_state "$target"
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

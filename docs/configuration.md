@@ -163,7 +163,10 @@ It currently supports only `tmux` and `herdr` supervisor panes.
 Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
 Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
-Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
+Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr.
+There is no further fallback: away mode requires firstmate to run inside a tracked tmux or herdr pane, and the daemon refuses to start rather than guess a target when none of those resolve, the same way it refuses an unsupported backend.
+An auto-discovered target (from `$TMUX_PANE` or `$HERDR_PANE_ID`) is also required to prove it is firstmate's own pane before the daemon trusts it, refusing when the pane runs nothing but a bare shell; an explicit `FM_SUPERVISOR_TARGET` override skips that proof, since it is the captain's own deliberate choice of pane.
+When firstmate itself is not running inside tmux or herdr (for example a harness running in a plain terminal window), set `FM_SUPERVISOR_TARGET` (and `FM_SUPERVISOR_BACKEND` if not tmux) to firstmate's own pane before entering away mode; there is no way to supervise a firstmate that away mode cannot locate.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
