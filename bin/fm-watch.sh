@@ -2663,15 +2663,35 @@ EOF
             handle_run_step_stale "$w" "$task" "$h"
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+            last=$(last_status_line "$STATE/$task.status")
+            if [ -e "$pf" ] || status_is_paused_or_captain_held "$last"; then
               IFS=$'\t' read -r crew_class crew_src crew_detail <<<"$(pause_state_class "$w" "$task" 1)"
               case "$crew_class" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_tracking "$key"
-                         if [ "$crew_src" = run-step ]; then
-                           handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+                # A FRESH declaration (status line reads paused/captain-held
+                # but this key was never yet absorbed as such, so $pf is
+                # still absent) outranks a working verdict for silence
+                # attribution on first sight - the worker's own account of
+                # its quiet beats firstmate's inference - and takes the
+                # ordinary wedge timer, which owns its own declared-wait
+                # deferral (wedge_wait_evidence). Once $pf already marks this
+                # key as absorbed-paused, a later authoritative working/
+                # run-step verdict is firstmate's own live re-verification
+                # overriding a possibly-stale declaration, so it resumes the
+                # run-step cadence instead (test: a resumed run-step must not
+                # keep deferring to a pause the crew has since moved past).
+                working) if [ ! -e "$pf" ] && status_is_paused_or_captain_held "$last"; then
+                           clear_pause_state "$key"
+                           clear_run_step_state "$key"
+                           printf '%s' "$h" > "$sf"
+                           wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          else
-                           handle_run_step_stale "$w" "$task" "$h"
+                           clear_pause_tracking "$key"
+                           if [ "$crew_src" = run-step ]; then
+                             handle_run_step_stale "$w" "$task" "$h" "$crew_detail"
+                           else
+                             handle_run_step_stale "$w" "$task" "$h"
+                           fi
                          fi
                          ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
