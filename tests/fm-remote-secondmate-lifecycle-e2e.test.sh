@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -464,7 +466,10 @@ projects_snapshot() { # <dir>
 }
 mkdir -p "$TMP_ROOT/seed-parent/projects"
 fm_git_init_commit "$TMP_ROOT/seed-parent/projects/resident"
-git init -q --bare "$TMP_ROOT/beta.git"
+# Pin the bare origin's initial branch to the one fm_git_init_commit creates.
+# Left to init.defaultBranch, its HEAD names a branch the push never creates on
+# a host that still defaults to master, and cloning it checks out nothing.
+git init -q --bare -b main "$TMP_ROOT/beta.git"
 fm_git_init_commit "$TMP_ROOT/beta-src"
 git -C "$TMP_ROOT/beta-src" remote add origin "file://$TMP_ROOT/beta.git"
 git -C "$TMP_ROOT/beta-src" push -q -u origin HEAD
@@ -1024,8 +1029,13 @@ resolve_ios_pending() {
 }
 resolve_ios_pending
 
-# Structured fleet state comes from each home's own snapshot. The remote host is
-# explicit, and the local route remains alongside it.
+# Structured fleet state comes from each home's published ledger. The remote
+# host is explicit, and the local route remains alongside it.
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCAL_HOME" \
+  "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null \
+  || fail "local fixture did not publish its home ledger"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-home-summary-refresh.sh >/dev/null \
+  || fail "remote fixture did not publish its home ledger"
 SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .provenance.selected == "structured-home")' >/dev/null; then
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
@@ -1055,6 +1065,30 @@ assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-loc
 assert_present "$REMOTE_HOME/REMOTE_UPDATE_PROBE" "remote update did not materialize the code-root commit"
 pass "remote update imports and fast-forwards the persistent home on its configured host"
 
+# The remote restart verb is not a second implementation: its host-local leg runs
+# the ORDINARY control plane against a record that is plain and local on that
+# host. These two refusals can only come from that plane's own pre-stop
+# capability tables, and they leave the live agent exactly as it was - which is
+# the whole safety property of asking before anything is stopped.
+RELAUNCH_UNVERIFIED=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios notaharness - - 2>&1) && fail "an unverified runtime should refuse a remote restart"
+assert_contains "$RELAUNCH_UNVERIFIED" 'unverified remote secondmate harness' \
+  "the remote restart verb did not refuse an unverified runtime"
+RELAUNCH_ROUTE_META="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$RELAUNCH_ROUTE_META" "$TMP_ROOT/ios-before-relaunch.meta"
+mkdir -p "$TMP_ROOT/not-a-checkout"
+sed "s|^worktree=.*|worktree=$TMP_ROOT/not-a-checkout|" \
+  "$TMP_ROOT/ios-before-relaunch.meta" > "$RELAUNCH_ROUTE_META"
+RELAUNCH_CHECKPOINT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios codex - - 2>&1) && fail "a restart with no accountable checkout should refuse"
+assert_contains "$RELAUNCH_CHECKPOINT" 'refusing to relaunch without a checkout whose unlanded work can be accounted for' \
+  "the host-local restart did not reach the control plane's own pre-stop checkpoint"
+cp "$TMP_ROOT/ios-before-relaunch.meta" "$RELAUNCH_ROUTE_META"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "a refused remote restart must leave the running agent untouched"
+pass "the remote restart verb delegates to the host-local control plane and refuses before stopping anything"
+
+
 rm -f "$TMP_ROOT/doctor.repaired"
 : > "$DOCTOR_LOG"
 [ "$(FM_FAKE_SSH_MODE=doctor-fixable remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unreadable ] \
@@ -1072,6 +1106,22 @@ launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the endpoint was not probed successfully after readiness repair"
 pass "startup repairs remote readiness before probing without relaunching"
+
+# --- a stale herdr client shadowing the one the server accepts --------------
+# The remote host's job PATH can resolve an older self-updated herdr ahead of
+# the one its running server accepts; the server then refuses every command
+# from it with protocol_mismatch. The host-local state read must still reach
+# the live endpoint through the accepted client.
+make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
+export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
+SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
+[ "$SHADOWED_STATE" = alive ] \
+  || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"
+assert_contains "$(cat "$TMP_ROOT/client-pair/stale.log")" 'pane get' "the stale client was not the one the job PATH resolved first"
+unset FM_HERDR_PAIR_DIR
+pass "the host-local state read steps around a stale shadowing herdr client"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-liveness-legacy.meta"
@@ -1107,9 +1157,11 @@ mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "startup reports alive legacy backends without changing their routes"
 
-# Host loss never creates a local replacement. This legacy fixture has no
-# published ledger to cache, so the structured-home read degrades explicitly;
+# Host loss never creates a local replacement. Remove both the published ledger
+# and its parent-side cache so the structured-home read degrades explicitly;
 # endpoint liveness remains the startup supervisor's concern.
+rm -f -- "$REMOTE_HOME/state/home-summary.json"
+rm -rf -- "$PARENT/state/secondmate-summary-cache"
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
 rm -f -- "$PARENT/state/.last-watcher-beat"
@@ -1119,7 +1171,7 @@ assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skippe
 UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios"
   and .current.state == "unknown" and .provenance.selected != "structured-home"
-  and (.current.reason | test("failed|timed out")))' >/dev/null \
+  and (.current.reason | test("home ledger.*(timed out|missing|unreadable|invalid)")))' >/dev/null \
   || fail "unreachable no-ledger remote home did not degrade to explicit unknown state"
 printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
   || fail "unreachable remote endpoint liveness was not left to supervision"
