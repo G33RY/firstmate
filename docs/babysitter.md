@@ -2,7 +2,8 @@
 
 The babysitter catches firstmate telling the captain it will do something and then not doing it: a stated commitment that never turns into action, a captain instruction firstmate never acknowledged or acted on, or work that is nominally under way but shows no visible progress for a long stretch. It is a third, independent observer beside the turn-end guard (which only checks "is a supervision cycle armed") and the watcher (which only watches crew liveness) - neither of those looks at whether firstmate's own stated intentions become actions.
 
-It has three parts: a deterministic capture hook that records the dialog, a persistent judge agent that reads it and decides, and a two-tier escalation ladder. A fourth, fully deterministic path (PARKED AT CHECKPOINT, below) needs no judge at all.
+It has three parts: a deterministic capture hook that records the dialog, a persistent judge agent that reads it and decides, and a two-tier escalation ladder.
+A fourth, fully deterministic path (PARKED AT CHECKPOINT, below) and a deterministic context-size guard need no judge at all.
 
 Capture and PARKED AT CHECKPOINT run unconditionally in a genuine primary checkout. The judge itself is opt-in: create `config/babysitter-enabled` once (see [`configuration.md`](configuration.md)) to have session start spawn and thereafter maintain it; without that file the judge never spawns and its liveness layer is a true no-op.
 
@@ -58,11 +59,27 @@ Never read your own findings store from the start either; if you need to check w
 
 `bin/fm-babysitter-ntfy.sh` is the single tier-2 sender, used by both the judge and the deterministic parked-checkpoint path. It reads the ntfy topic fresh from `config/babysitter-ntfy-topic` (absent = tier 2 disabled), rate-limits each reason (`unmet-commitment`, `parked-checkpoint`, `judge-down`) independently to one send per `FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default 1800s) so one condition's push cannot suppress a different condition's push, and only ever sends one of three fixed templates with a plain count and a plain age in seconds interpolated - no chat content, project name, task id, PR URL, or file path can reach the payload, because the CLI has no parameter that accepts one.
 
+## Context-Size Guard (deterministic, no judge)
+
+`bin/fm-babysitter-context-lib.sh` runs from the same `state/babysitter.check.sh` watcher poll as judge liveness and cadence.
+It measures the primary firstmate transcript recorded by the capture hook and every live task record under `state/*.meta`.
+For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against the model context window; when no transcript is reachable it falls back to a rendered context percentage from the pane.
+The default threshold is 40 percent and `config/babysitter-context-threshold-percent` sets a home-local integer override.
+
+For a live worker at or above the threshold, the guard relaunches only after `bin/fm-crew-state.sh <id>` reports an idle boundary state and no full-gate lock is visible in that worktree's `.no-mistakes` state.
+The relaunch goes through `bin/fm-control.sh <id> relaunch --note ...`, and the note is built only from durable state: latest status event, branch, head, and PR URL if one is present.
+The guard records the task's current spawn generation before acting and will not relaunch that same generation twice.
+If a worker is over threshold but still working, or a full-gate lock is present, it records one deferred finding for that generation and waits for a later poll.
+
+For the primary firstmate, the guard measures and records the over-threshold condition but fails closed unless a supported primary placement restart contract is configured.
+An unrecorded macOS Terminal.app primary therefore produces a durable finding and a `check:` wake instead of an automatic restart.
+That alert path is deliberate: without a placement-owned command, the babysitter cannot prove that the primary is between turns, that the captain is not typing, and that no captain message is unread.
+
 ## Liveness and persistence guarantees
 
 What survives, and what does not, across a session end, a context clear, a reboot, or a terminal-server death:
 
-- **Survives everything, including a reboot**: the ledger, its cursor, the findings store, its cursor, and all babysitter config - all plain files on disk.
+- **Survives everything, including a reboot**: the ledger, its cursor, the findings store, its cursor, the context guard's per-generation action markers, and all babysitter config - all plain files on disk.
 - **Survives a session end or context clear, not a reboot or terminal-server death**: the judge's own running process (its tmux window).
 - **Guaranteed to come back on its own once enabled**, without any agent noticing: judge liveness is a deterministic bash-level guarantee, never the judge's own responsibility. It is opt-in per home (`config/babysitter-enabled`, see [`configuration.md`](configuration.md)); without that flag the whole liveness layer is a true no-op. `bin/fm-bootstrap.sh` calls `fm_babysitter_liveness_check` (`bin/fm-babysitter-liveness-lib.sh`) once per session start, and a registered `state/babysitter.check.sh` gives the watcher the same check on its own poll cadence, so a judge that dies mid-session is noticed and relaunched without waiting for the next session start. `fm_backend_agent_state` classifies the judge's window as `alive` / `dead` / `missing` / `ambiguous` / `unreadable` / `unverified`; only `dead`/`missing` trigger a relaunch, everything else is preserved and reported. After `FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default 3) consecutive failed relaunches the judge is irrevivable: this fires the tier-2 nudge directly (`--reason judge-down`) and reports it loudly at the next session-start digest - silent death is the one outcome this feature cannot have. This is the judge's ONLY liveness owner: the ordinary watcher's pane-stale path (`bin/fm-watch.sh`) excludes `kind=babysitter` outright, because an idle window between passes is the judge's healthy resting state, not a stall.
 - **Guaranteed to actually run once alive**, also without any agent noticing: a live judge process is not the same guarantee as a judge that ever runs a second pass. Cadence (above) is that separate guarantee - the same `state/babysitter.check.sh` also owns it, so a judge that is alive but has gone quiet is noticed and re-invoked on the same poll cadence as liveness, never waiting on the judge to decide to look again.
