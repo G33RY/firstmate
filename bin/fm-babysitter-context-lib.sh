@@ -11,6 +11,12 @@ fm_bctx_meta_get() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_bctx_shell_quote() {  # <value>
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 fm_bctx_threshold_percent() {
   local cfg="$CONFIG/babysitter-context-threshold-percent" value
   value=$(cat "$cfg" 2>/dev/null || true)
@@ -102,6 +108,12 @@ fm_bctx_wake() {  # <key> <message>
   fm_wake_append check "$1" "check: $2" >/dev/null 2>&1 || true
 }
 
+fm_bctx_record_get() {  # <record> <key>
+  local record=$1 key=$2
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  grep "^$key=" "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
 fm_bctx_status_line() {  # <id>
   local log="$STATE/$1.status"
   [ -f "$log" ] || { printf 'none'; return; }
@@ -131,7 +143,14 @@ fm_bctx_progress_note() {  # <id> <meta> <percent> <threshold>
 }
 
 fm_bctx_full_gate_lock_present() {  # <worktree>
-  local wt=$1
+  local wt=$1 lock=${FM_BABYSITTER_CONTEXT_FULL_GATE_LOCK:-/tmp/fm-full-gate.lock}
+  if [ -e "$lock" ]; then
+    if command -v lockf >/dev/null 2>&1; then
+      lockf -k -t 0 "$lock" true >/dev/null 2>&1 || return 0
+    else
+      return 0
+    fi
+  fi
   [ -n "$wt" ] && [ -d "$wt/.no-mistakes" ] || return 1
   find "$wt/.no-mistakes" -maxdepth 4 \( -name '*full*gate*.lock' -o -name '*gate*.lock' \) -print -quit 2>/dev/null | grep -q .
 }
@@ -161,6 +180,7 @@ fm_bctx_marker_seen() {  # <marker> <key>
 fm_bctx_check_worker() {  # <id> <threshold>
   local id=$1 threshold=$2 meta="$STATE/$1.meta"
   local backend target agent_state usage percent used window model source key marker current state wt note control_bin
+  mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   [ -f "$meta" ] || return 0
   [ "$(fm_bctx_meta_get "$meta" kind)" != babysitter ] || return 0
   command -v fm_backend_of_meta >/dev/null 2>&1 || return 0
@@ -217,8 +237,161 @@ fm_bctx_primary_transcript() {
   printf '%s\n' "$path"
 }
 
+fm_bctx_latest_transcript_role() {  # <transcript>
+  local transcript=$1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -r '
+    select((.isSidechain // false) != true)
+    | (.message.role? // .type? // empty)
+    | select(. == "assistant" or . == "user")
+  ' "$transcript" 2>/dev/null | tail -1
+}
+
+fm_bctx_primary_idle_boundary() {  # <transcript>
+  local transcript=$1 role busy_record busy_state
+  role=$(fm_bctx_latest_transcript_role "$transcript") || return 1
+  [ "$role" = assistant ] || return 1
+  busy_record="$STATE/.babysitter-primary-busy"
+  busy_state=$(fm_bctx_record_get "$busy_record" state || true)
+  [ "$busy_state" = idle ] || return 1
+}
+
+fm_bctx_primary_placement_record() {
+  local record="$STATE/.babysitter-primary-placement"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  printf '%s\n' "$record"
+}
+
+fm_bctx_primary_restart_command() {  # <placement-record>
+  local record=$1 configured command cwd
+  configured="$CONFIG/babysitter-primary-restart-command"
+  if [ -f "$configured" ] && [ ! -L "$configured" ]; then
+    command=$(sed -n '1p' "$configured" 2>/dev/null || true)
+  else
+    command=$(fm_bctx_record_get "$record" launch_command || true)
+  fi
+  [ -n "$command" ] || return 1
+  case " $command " in
+    *" --continue "*|*" --resume "*|*" --fork-session "*|*" -c "*|*" -r "*) return 1 ;;
+  esac
+  cwd=$(fm_bctx_record_get "$record" cwd || true)
+  [ -n "$cwd" ] || cwd="$FM_BABYSITTER_CONTEXT_LIB_DIR/.."
+  printf 'cd %s && exec %s\n' "$(fm_bctx_shell_quote "$cwd")" "$command"
+}
+
+fm_bctx_wait_primary_dead() {  # <backend> <target>
+  local backend=$1 target=$2 i state
+  i=0
+  while [ "$i" -lt 30 ]; do
+    state=$(fm_backend_foreground_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
+    case "$state" in dead|missing) return 0 ;; esac
+    sleep 0.2
+    i=$((i + 1))
+  done
+  return 1
+}
+
+fm_bctx_restart_primary_tmux() {  # <placement-record>
+  local record=$1 target launch composer state
+  target=$(fm_bctx_record_get "$record" target || true)
+  [ -n "$target" ] || return 1
+  command -v fm_backend_foreground_agent_state >/dev/null 2>&1 || return 1
+  command -v fm_backend_composer_state >/dev/null 2>&1 || return 1
+  state=$(fm_backend_foreground_agent_state tmux "$target" 2>/dev/null || printf unreadable)
+  [ "$state" = alive ] || return 1
+  composer=$(fm_backend_composer_state tmux "$target" "" 2>/dev/null || printf unknown)
+  [ "$composer" = empty ] || return 1
+  launch=$(fm_bctx_primary_restart_command "$record") || return 1
+  fm_backend_send_text_submit tmux "$target" /exit 3 0.1 0.5 "" >/dev/null 2>&1 || return 1
+  fm_bctx_wait_primary_dead tmux "$target" || return 1
+  fm_backend_source tmux || return 1
+  fm_backend_tmux_send_literal "$target" "$launch" || return 1
+  fm_backend_tmux_send_key "$target" Enter || return 1
+}
+
+fm_bctx_terminal_contents() {  # <tty>
+  local osa_bin=${FM_BABYSITTER_CONTEXT_OSASCRIPT_BIN:-osascript}
+  "$osa_bin" - "$@" <<'OSA'
+on run argv
+  set targetTTY to item 1 of argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        set tabTTY to tty of t as text
+        if tabTTY is targetTTY or tabTTY is "/dev/" & targetTTY or "/dev/" & tabTTY is targetTTY then
+          return contents of t as text
+        end if
+      end repeat
+    end repeat
+  end tell
+  error "terminal tty not found"
+end run
+OSA
+}
+
+fm_bctx_terminal_contents_hash() {  # <tty>
+  local contents
+  contents=$(fm_bctx_terminal_contents "$1") || return 1
+  printf '%s' "$contents" | cksum | awk '{print $1 ":" $2}'
+}
+
+fm_bctx_terminal_contents_unchanged() {  # <placement-record> <tty>
+  local record=$1 tty=$2 recorded current
+  recorded=$(fm_bctx_record_get "$record" terminal_contents_hash || true)
+  [ -n "$recorded" ] || return 1
+  current=$(fm_bctx_terminal_contents_hash "$tty") || return 1
+  [ "$current" = "$recorded" ]
+}
+
+fm_bctx_terminal_osa() {  # <tty> <exit-command> <launch-command>
+  local osa_bin=${FM_BABYSITTER_CONTEXT_OSASCRIPT_BIN:-osascript}
+  "$osa_bin" - "$@" <<'OSA'
+on run argv
+  set targetTTY to item 1 of argv
+  set exitCommand to item 2 of argv
+  set launchCommand to item 3 of argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        set tabTTY to tty of t as text
+        if tabTTY is targetTTY or tabTTY is "/dev/" & targetTTY or "/dev/" & tabTTY is targetTTY then
+          do script exitCommand in t
+          delay 1
+          do script launchCommand in t
+          return "restarted"
+        end if
+      end repeat
+    end repeat
+  end tell
+  error "terminal tty not found"
+end run
+OSA
+}
+
+fm_bctx_restart_primary_terminal() {  # <placement-record>
+  local record=$1 tty launch osa_bin=${FM_BABYSITTER_CONTEXT_OSASCRIPT_BIN:-osascript}
+  [ "$(uname 2>/dev/null)" = Darwin ] || return 1
+  command -v "$osa_bin" >/dev/null 2>&1 || return 1
+  tty=$(fm_bctx_record_get "$record" tty || true)
+  [ -n "$tty" ] || return 1
+  launch=$(fm_bctx_primary_restart_command "$record") || return 1
+  fm_bctx_terminal_contents_unchanged "$record" "$tty" || return 1
+  fm_bctx_terminal_osa "$tty" /exit "$launch" >/dev/null 2>&1
+}
+
+fm_bctx_restart_primary() {  # <placement-record>
+  local record=$1 placement
+  placement=$(fm_bctx_record_get "$record" placement || true)
+  case "$placement" in
+    tmux) fm_bctx_restart_primary_tmux "$record" ;;
+    terminal) fm_bctx_restart_primary_terminal "$record" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_bctx_check_primary() {  # <threshold>
-  local threshold=$1 transcript usage percent used window model source key marker summary
+  local threshold=$1 transcript usage percent used window model source key marker summary placement_record
+  mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   transcript=$(fm_bctx_primary_transcript) || return 0
   usage=$(fm_bctx_usage_from_transcript "$transcript" 2>/dev/null) || return 0
   IFS=$'\t' read -r percent used window model source <<EOF
@@ -227,11 +400,20 @@ EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
   [ "$percent" -ge "$threshold" ] || return 0
   key="$transcript:$used:$window"
-  marker="$STATE/babysitter-context/primary.alert"
+  marker="$STATE/babysitter-context/primary.relaunch"
   fm_bctx_marker_seen "$marker" "$key" && return 0
-  summary="primary firstmate context ${percent}% >= ${threshold}%; no supported automatic primary restart placement is configured"
-  fm_bctx_append_finding context-alert "$summary"
-  fm_bctx_wake "babysitter-context:primary" "$summary"
+  if fm_bctx_primary_idle_boundary "$transcript" \
+     && placement_record=$(fm_bctx_primary_placement_record) \
+     && fm_bctx_restart_primary "$placement_record"; then
+    summary="primary firstmate context ${percent}% >= ${threshold}%; restarted into a fresh session at idle boundary"
+    fm_bctx_append_finding context-relaunch "$summary"
+  else
+    marker="$STATE/babysitter-context/primary.alert"
+    fm_bctx_marker_seen "$marker" "$key" && return 0
+    summary="primary firstmate context ${percent}% >= ${threshold}%; no supported safe primary restart boundary was proven"
+    fm_bctx_append_finding context-alert "$summary"
+    fm_bctx_wake "babysitter-context:primary" "$summary"
+  fi
   printf '%s\n' "$key" > "$marker" 2>/dev/null || true
 }
 

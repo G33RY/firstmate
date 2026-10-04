@@ -25,6 +25,30 @@ note_error() { # <reason>
   rm -f "$MARKER.tmp.$$" 2>/dev/null || true
 }
 
+terminal_contents_hash() {  # <tty>
+  local tty=$1 contents
+  [ "$(uname 2>/dev/null)" = Darwin ] || return 1
+  command -v osascript >/dev/null 2>&1 || return 1
+  contents=$(osascript - "$tty" <<'OSA' 2>/dev/null
+on run argv
+  set targetTTY to item 1 of argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        set tabTTY to tty of t as text
+        if tabTTY is targetTTY or tabTTY is "/dev/" & targetTTY or "/dev/" & tabTTY is targetTTY then
+          return contents of t as text
+        end if
+      end repeat
+    end repeat
+  end tell
+  error "terminal tty not found"
+end run
+OSA
+  ) || return 1
+  printf '%s' "$contents" | cksum | awk '{print $1 ":" $2}'
+}
+
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
@@ -38,6 +62,25 @@ TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.transcript_path|type)=="string
 { printf '%s\t%s\n' "$SESSION_ID" "$TRANSCRIPT" > "$STATE/.babysitter-primary-transcript.tmp.$$" \
     && mv -f "$STATE/.babysitter-primary-transcript.tmp.$$" "$STATE/.babysitter-primary-transcript"; } 2>/dev/null || true
 rm -f "$STATE/.babysitter-primary-transcript.tmp.$$" 2>/dev/null || true
+
+PLACEMENT_TMP="$STATE/.babysitter-primary-placement.tmp.$$"
+{
+  printf 'session_id=%s\n' "$SESSION_ID"
+  printf 'transcript=%s\n' "$TRANSCRIPT"
+  printf 'epoch=%s\n' "$(date +%s 2>/dev/null || echo 0)"
+  printf 'cwd=%s\n' "$FM_ROOT"
+  printf 'pid=%s\n' "${PPID:-}"
+  tty_name=$(ps -o tty= -p "${PPID:-}" 2>/dev/null | awk 'NF {print $1; exit}' || true)
+  cmd_line=$(ps -o command= -p "${PPID:-}" 2>/dev/null || true)
+  [ -z "${TMUX_PANE:-}" ] || printf 'placement=tmux\nbackend=tmux\ntarget=%s\n' "$TMUX_PANE"
+  if [ -z "${TMUX_PANE:-}" ] && [ "${TERM_PROGRAM:-}" = Apple_Terminal ] && [ -n "$tty_name" ]; then
+    printf 'placement=terminal\nbackend=terminal-app\ntty=%s\n' "$tty_name"
+    terminal_hash=$(terminal_contents_hash "$tty_name" || true)
+    [ -z "$terminal_hash" ] || printf 'terminal_contents_hash=%s\n' "$terminal_hash"
+  fi
+  [ -z "$cmd_line" ] || printf 'launch_command=%s\n' "$cmd_line"
+} > "$PLACEMENT_TMP" 2>/dev/null && mv -f "$PLACEMENT_TMP" "$STATE/.babysitter-primary-placement" 2>/dev/null || true
+rm -f "$PLACEMENT_TMP" 2>/dev/null || true
 
 CURSOR_FILE="$STATE/.babysitter-transcript-cursor"
 LOCK="$STATE/.babysitter-capture.lock"

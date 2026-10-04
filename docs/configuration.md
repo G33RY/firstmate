@@ -234,7 +234,10 @@ It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): prese
 `FM_BABYSITTER_INVOKE_STUCK_SECS` (default `600`) is how long an unacknowledged pass-dispatch record may sit in the judge's steering inbox before the cadence check treats it as orphaned rather than in flight.
 `config/babysitter-context-threshold-percent` (optional, local, gitignored, one integer from 1 through 100) sets the deterministic context-size threshold, default 40 percent.
 The context guard records over-threshold actions in the babysitter findings store and rate-limits worker relaunches to once per task spawn generation.
-Primary firstmate context alerts fail closed unless a supported primary placement restart contract exists; an unrecorded Terminal.app primary is alerted rather than controlled.
+Primary firstmate restarts are allowed only from a supported placement breadcrumb recorded by the primary hooks: tmux via `$TMUX_PANE`, or macOS Terminal.app via the tab tty and idle tab-content fingerprint.
+The guard also requires an idle lifecycle breadcrumb and an assistant transcript tail before it sends the harness exit command and relaunches the recorded command from the recorded checkout.
+If the recorded launch command is unavailable or contains a resume/continue flag, `config/babysitter-primary-restart-command` may provide the exact fresh-session command to run instead.
+When any boundary cannot be proven, the guard alerts through the babysitter findings and wake path rather than controlling the primary.
 See [`babysitter.md`](babysitter.md) for the full contract, including exactly what survives a session end, a context clear, a reboot, or a terminal-server death.
 
 ## Gate defaults (.no-mistakes.yaml)

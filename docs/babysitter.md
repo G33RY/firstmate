@@ -71,15 +71,18 @@ The relaunch goes through `bin/fm-control.sh <id> relaunch --note ...`, and the 
 The guard records the task's current spawn generation before acting and will not relaunch that same generation twice.
 If a worker is over threshold but still working, or a full-gate lock is present, it records one deferred finding for that generation and waits for a later poll.
 
-For the primary firstmate, the guard measures and records the over-threshold condition but fails closed unless a supported primary placement restart contract is configured.
-An unrecorded macOS Terminal.app primary therefore produces a durable finding and a `check:` wake instead of an automatic restart.
-That alert path is deliberate: without a placement-owned command, the babysitter cannot prove that the primary is between turns, that the captain is not typing, and that no captain message is unread.
+For the primary firstmate, the tracked Claude hooks record a busy/idle breadcrumb and the capture hook records the transcript path plus the primary placement when it can prove one.
+The guard restarts only when the newest transcript turn is an assistant turn, the lifecycle breadcrumb is idle, and the placement has a supported restart command.
+Supported placements are a tmux pane recorded from `$TMUX_PANE` and a macOS Terminal.app tab recorded by its tty plus a tab-content fingerprint from the idle hook.
+Both paths send the harness exit command first, then relaunch the recorded command from the recorded checkout so session start rebuilds from durable state in a fresh context.
+The Terminal.app path also requires the tab contents to match the idle fingerprint immediately before restart, so a draft typed after the idle breadcrumb turns into an alert instead of a relaunch.
+If the placement, lifecycle state, transcript tail, composer state, or relaunch command is not proven safe, the guard records a durable finding and queues a `check:` wake instead of acting.
 
 ## Liveness and persistence guarantees
 
 What survives, and what does not, across a session end, a context clear, a reboot, or a terminal-server death:
 
-- **Survives everything, including a reboot**: the ledger, its cursor, the findings store, its cursor, the context guard's per-generation action markers, and all babysitter config - all plain files on disk.
+- **Survives everything, including a reboot**: the ledger, its cursor, the findings store, its cursor, the context guard's per-generation action markers, the primary placement breadcrumb, and all babysitter config - all plain files on disk.
 - **Survives a session end or context clear, not a reboot or terminal-server death**: the judge's own running process (its tmux window).
 - **Guaranteed to come back on its own once enabled**, without any agent noticing: judge liveness is a deterministic bash-level guarantee, never the judge's own responsibility. It is opt-in per home (`config/babysitter-enabled`, see [`configuration.md`](configuration.md)); without that flag the whole liveness layer is a true no-op. `bin/fm-bootstrap.sh` calls `fm_babysitter_liveness_check` (`bin/fm-babysitter-liveness-lib.sh`) once per session start, and a registered `state/babysitter.check.sh` gives the watcher the same check on its own poll cadence, so a judge that dies mid-session is noticed and relaunched without waiting for the next session start. `fm_backend_agent_state` classifies the judge's window as `alive` / `dead` / `missing` / `ambiguous` / `unreadable` / `unverified`; only `dead`/`missing` trigger a relaunch, everything else is preserved and reported. After `FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default 3) consecutive failed relaunches the judge is irrevivable: this fires the tier-2 nudge directly (`--reason judge-down`) and reports it loudly at the next session-start digest - silent death is the one outcome this feature cannot have. This is the judge's ONLY liveness owner: the ordinary watcher's pane-stale path (`bin/fm-watch.sh`) excludes `kind=babysitter` outright, because an idle window between passes is the judge's healthy resting state, not a stall.
 - **Guaranteed to actually run once alive**, also without any agent noticing: a live judge process is not the same guarantee as a judge that ever runs a second pass. Cadence (above) is that separate guarantee - the same `state/babysitter.check.sh` also owns it, so a judge that is alive but has gone quiet is noticed and re-invoked on the same poll cadence as liveness, never waiting on the judge to decide to look again.
