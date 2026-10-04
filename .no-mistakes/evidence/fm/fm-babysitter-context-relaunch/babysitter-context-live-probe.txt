@@ -1,0 +1,12 @@
+# babysitter context guard live probe (commit 049675b)
+## transcript usage on real JSONL (tokens, used, window, source)
+sidechain      45	90000	200000	transcript:/tmp/bctx-live/t/sidechain.jsonl
+floor-under    39	79999	200000	transcript:/tmp/bctx-live/t/floor-under.jsonl
+floor-at       40	80000	200000	transcript:/tmp/bctx-live/t/floor-at.jsonl
+bigtail        60	120000	200000	transcript:/tmp/bctx-live/t/bigtail.jsonl
+## pane footer read from live tmux worker (decoy 'Context 45% used' above footer ignored) -> 46
+## codex 'Context 60% left' footer -> 40
+## end-to-end live worker 46% parked: control args
+## findings
+{"seq":1,"epoch":1791133518,"kind":"context-relaunch","summary":"worker w1 context 46% (of the reported window) >= 40%; relaunched at idle boundary","tier":1,"ledger_through":0}
+{"seq":2,"epoch":1791133526,"kind":"context-deferred","summary":"worker w1 context 46% (of the reported window) >= 40% but current state is working; relaunch deferred","tier":1,"ledger_through":0}
