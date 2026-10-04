@@ -93,6 +93,7 @@ fm_bctx_usage_from_pane() {  # <backend> <target> <label>
 }
 
 fm_bctx_task_transcript() {  # <id>
+  # shellcheck disable=SC2153 # $STATE is resolved by the caller before sourcing this lib.
   local record="$STATE/$1.turn-transcript" path
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   path=$(sed -n '1p' "$record" 2>/dev/null) || return 1
@@ -181,7 +182,7 @@ fm_bctx_marker_seen() {  # <marker> <key>
 
 fm_bctx_check_worker() {  # <id> <threshold>
   local id=$1 threshold=$2 meta="$STATE/$1.meta"
-  local backend target agent_state usage percent used window source key marker current state wt note control_bin failure failure_key basis
+  local backend target agent_state usage percent used source key marker current state wt note control_bin failure failure_key basis
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   [ -f "$meta" ] || return 0
   [ "$(fm_bctx_meta_get "$meta" kind)" != babysitter ] || return 0
@@ -192,7 +193,7 @@ fm_bctx_check_worker() {  # <id> <threshold>
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   [ "$agent_state" = alive ] || return 0
   usage=$(fm_bctx_task_usage "$id" "$meta" 2>/dev/null) || return 0
-  IFS=$'\t' read -r percent used window source <<EOF
+  IFS=$'\t' read -r percent used _ source <<EOF
 $usage
 EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
@@ -538,7 +539,9 @@ fm_babysitter_context_check() {
   [ -e "$enabled_flag" ] || return 0
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   threshold=$(fm_bctx_threshold_percent)
+  # shellcheck source=bin/fm-wake-lib.sh
   command -v fm_wake_append >/dev/null 2>&1 || . "$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-backend.sh
   command -v fm_backend_of_meta >/dev/null 2>&1 || . "$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-backend.sh"
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue

@@ -493,12 +493,19 @@ target=%1
 cwd=$home
 launch_command=claude
 EOF
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_foreground_agent_state() { printf 'alive'; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_composer_state() { printf 'empty'; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_send_text_submit() { printf 'exit\n' >> "$STATE/exit-sends"; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_source() { return 0; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_tmux_send_literal() { printf 'launch\n' >> "$STATE/launch-sends"; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_tmux_send_key() { return 0; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
   fm_bctx_check_primary 40
   fm_bctx_check_primary 40
@@ -587,6 +594,7 @@ launch_command=claude
 terminal_contents_hash=$terminal_hash
 EOF
   fakebin=$(terminal_fakebin "$home" "same contents")
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
   PATH="$fakebin:$PATH" FM_BABYSITTER_CONTEXT_OSASCRIPT_BIN="$fakebin/osascript" fm_bctx_check_primary 40
   kill "$live_pid" 2>/dev/null || true
@@ -632,6 +640,7 @@ case "\$script" in
 esac
 EOF
   chmod +x "$fakebin/uname" "$fakebin/osascript"
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
   PATH="$fakebin:$PATH" FM_BABYSITTER_CONTEXT_OSASCRIPT_BIN="$fakebin/osascript" fm_bctx_check_primary 40
   [ ! -e "$home/osascript.args" ] || fail "Terminal restart ran despite changed tab contents"
@@ -700,6 +709,7 @@ target=%1
 cwd=$home
 launch_command=claude
 EOF
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
   fm_bctx_check_primary 40
   [ ! -e "$STATE/launch-command" ] || fail "primary restarted before an idle boundary"
@@ -722,6 +732,7 @@ target=%1
 cwd=$home
 launch_command=claude
 EOF
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_foreground_agent_state() {
     if [ -e "$STATE/launched" ]; then
       local calls
@@ -731,11 +742,17 @@ EOF
     elif [ -e "$STATE/exited" ]; then printf dead
     else printf alive; fi
   }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_composer_state() { printf 'empty'; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_send_text_submit() { printf 'exit\n' >> "$STATE/exit-sends"; : > "$STATE/exited"; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_source() { return 0; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_tmux_send_literal() { printf 'launch\n' >> "$STATE/launch-sends"; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_backend_tmux_send_key() { : > "$STATE/launched"; }
+  # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
   fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
   fm_bctx_check_primary 40
   [ "$(wc -l < "$STATE/exit-sends")" -eq 1 ] || fail "first poll did not send exactly one /exit"
