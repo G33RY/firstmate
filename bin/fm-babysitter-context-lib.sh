@@ -145,7 +145,7 @@ fm_bctx_progress_note() {  # <id> <meta> <percent> <threshold>
   fi
   pr=$(fm_bctx_pr_from_status "$id" || true)
   [ -n "$pr" ] || pr=none
-  printf 'Context threshold reached (%s%% >= %s%%). Durable state before relaunch: latest_status=%s; branch=%s; head=%s; pr=%s.' \
+  printf 'Context threshold reached (%s%% of a 200k basis >= %s%%). Durable state before relaunch: latest_status=%s; branch=%s; head=%s; pr=%s.' \
     "$percent" "$threshold" "$status" "$branch" "$head" "$pr"
 }
 
@@ -204,7 +204,7 @@ EOF
       marker="$STATE/babysitter-context/$id.deferred"
       fm_bctx_marker_seen "$marker" "$key" && return 0
       printf '%s\n' "$key" > "$marker" 2>/dev/null || true
-      fm_bctx_append_finding context-deferred "worker $id context ${percent}% >= ${threshold}% but current state is ${state:-unknown}; relaunch deferred"
+      fm_bctx_append_finding context-deferred "worker $id context ${percent}% (of a 200k basis) >= ${threshold}% but current state is ${state:-unknown}; relaunch deferred"
       return 0
       ;;
   esac
@@ -214,10 +214,10 @@ EOF
   note=$(fm_bctx_progress_note "$id" "$meta" "$percent" "$threshold")
   control_bin=${FM_BABYSITTER_CONTEXT_CONTROL_BIN:-"$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-control.sh"}
   if FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-}}" FM_STATE_OVERRIDE="$STATE" "$control_bin" "$id" relaunch --note "$note" >/dev/null 2>&1; then
-    fm_bctx_append_finding context-relaunch "worker $id context ${percent}% >= ${threshold}%; relaunched at idle boundary"
+    fm_bctx_append_finding context-relaunch "worker $id context ${percent}% (of a 200k basis) >= ${threshold}%; relaunched at idle boundary"
     printf '%s\n' "$key" > "$marker" 2>/dev/null || true
   else
-    fm_bctx_append_finding context-alert "worker $id context ${percent}% >= ${threshold}% but relaunch failed"
+    fm_bctx_append_finding context-alert "worker $id context ${percent}% (of a 200k basis) >= ${threshold}% but relaunch failed"
     fm_bctx_wake "babysitter-context:$id" "babysitter could not relaunch worker $id after context reached ${percent}%"
     printf '%s\n' "$failure_key" > "$failure" 2>/dev/null || true
   fi
@@ -508,7 +508,7 @@ EOF
   marker="$STATE/babysitter-context/primary.relaunch"
   fm_bctx_marker_seen "$marker" "$key" && return 0
   fm_bctx_primary_idle_boundary "$transcript" || return 0
-  summary="primary firstmate context ${percent}% >= ${threshold}%"
+  summary="primary firstmate context ${percent}% (of a 200k basis) >= ${threshold}%"
   if placement_record=$(fm_bctx_primary_placement_record) \
      && fm_bctx_restart_primary "$placement_record" "$key" "$summary"; then
     fm_bctx_primary_settle_attempt "$attempt"

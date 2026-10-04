@@ -54,8 +54,14 @@ $out
 EOF
   [ "$percent" = 50 ] || fail "expected 50 percent, got $percent from $out"
   [ "$used" = 100000 ] || fail "cache tokens were not counted into used tokens: $out"
-  [ "$window" = 200000 ] || fail "default window was not chosen for a non-1M model: $out"
-  pass "transcript usage counts input plus cache tokens against the context window"
+  [ "$window" = 200000 ] || fail "usage was not measured against the fixed 200k basis: $out"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","model":"claude-x[1m]","usage":{"input_tokens":100000},"content":"done"}}' > "$TMP_ROOT/one-m.jsonl"
+  out=$(fm_bctx_usage_from_transcript "$TMP_ROOT/one-m.jsonl") || fail "[1m] usage parse failed"
+  IFS=$'\t' read -r percent _used window _model _source <<EOF
+$out
+EOF
+  [ "$percent" = 50 ] && [ "$window" = 200000 ] || fail "a [1m] model must still use the fixed 200k basis: $out"
+  pass "transcript usage counts input plus cache tokens against one fixed 200k basis for every model"
 }
 
 test_transcript_usage_found_past_tail_window() {
