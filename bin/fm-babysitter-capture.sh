@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-babysitter-context-lib.sh
+. "$SCRIPT_DIR/fm-babysitter-context-lib.sh"
 
 MARKER="$STATE/.babysitter-capture-error"
 note_error() { # <reason>
@@ -35,6 +37,24 @@ SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r 'if (.session_id|type)=="string" the
 TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.transcript_path|type)=="string" then .transcript_path else empty end' 2>/dev/null) || exit 0
 [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] || { note_error "malformed payload: missing session_id or transcript_path"; exit 0; }
 [ -f "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] && [ ! -L "$TRANSCRIPT" ] || { note_error "transcript unavailable: $TRANSCRIPT"; exit 0; }
+PLACEMENT_TMP="$STATE/.babysitter-primary-placement.tmp.$$"
+{
+  printf 'session_id=%s\n' "$SESSION_ID"
+  printf 'transcript=%s\n' "$TRANSCRIPT"
+  printf 'cwd=%s\n' "$FM_ROOT"
+  printf 'pid=%s\n' "${PPID:-}"
+  tty_name=$(ps -o tty= -p "${PPID:-}" 2>/dev/null | awk 'NF {print $1; exit}' || true)
+  cmd_line=$(ps -o command= -p "${PPID:-}" 2>/dev/null || true)
+  [ -z "${TMUX_PANE:-}" ] || printf 'placement=tmux\nbackend=tmux\ntarget=%s\n' "$TMUX_PANE"
+  if [ -z "${TMUX_PANE:-}" ] && [ "${TERM_PROGRAM:-}" = Apple_Terminal ] && [ -n "$tty_name" ]; then
+    printf 'placement=terminal\nbackend=terminal-app\ntty=%s\n' "$tty_name"
+    terminal_hash=$(fm_bctx_terminal_contents_hash "$tty_name" || true)
+    [ -z "$terminal_hash" ] || printf 'terminal_contents_hash=%s\n' "$terminal_hash"
+  fi
+  case "$cmd_line" in *$'\n'*) cmd_line= ;; esac
+  [ -z "$cmd_line" ] || printf 'launch_command=%s\n' "$cmd_line"
+} > "$PLACEMENT_TMP" 2>/dev/null && mv -f "$PLACEMENT_TMP" "$STATE/.babysitter-primary-placement" 2>/dev/null || true
+rm -f "$PLACEMENT_TMP" 2>/dev/null || true
 
 CURSOR_FILE="$STATE/.babysitter-transcript-cursor"
 LOCK="$STATE/.babysitter-capture.lock"

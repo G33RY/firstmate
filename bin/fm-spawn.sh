@@ -3695,6 +3695,7 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+TURNTRANSCRIPT="$STATE_REAL/$ID.turn-transcript"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3712,6 +3713,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
   }
+  rm -f -- "$TURNTRANSCRIPT"
   RELAUNCH_REPLACEMENT_PENDING=1
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
@@ -3779,7 +3781,7 @@ if [ "$KIND" != secondmate ]; then
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $(shell_quote "$FM_ROOT/bin/fm-babysitter-turn-transcript.sh") $(shell_quote "$TURNTRANSCRIPT") || true; $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
     cat >"$WT/.claude/settings.local.json" <<EOF

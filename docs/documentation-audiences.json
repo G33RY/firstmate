@@ -133,6 +133,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/caveman-learn/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -269,12 +273,20 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "admin-testing-guide.md",
+      "audience": "operator-example"
+    },
+    {
       "path": "CLAUDE.md",
       "audience": "agent-runtime"
     },
     {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "dumbcms-testing-guide.md",
+      "audience": "operator-example"
     },
     {
       "path": "GROK_BOT.md",
