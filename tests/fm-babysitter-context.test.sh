@@ -535,9 +535,9 @@ EOF
   fm_bctx_check_primary 40
   [ ! -e "$STATE/exit-command" ] || fail "primary got /exit while a tool_use was still unresolved"
   [ ! -e "$STATE/launch-command" ] || fail "primary relaunched while a tool_use was still unresolved"
-  grep -Fq 'context-alert' "$STATE/babysitter-findings.jsonl" \
-    || fail "unresolved tool_use did not alert"
-  pass "primary with an unresolved tool_use in its last assistant turn is not treated as idle"
+  [ ! -e "$STATE/wakes" ] || fail "a mid-turn primary queued a wake"
+  [ ! -e "$STATE/babysitter-findings.jsonl" ] || fail "a mid-turn primary recorded a finding"
+  pass "primary with an unresolved tool_use in its last assistant turn is left alone until idle"
 }
 
 test_primary_restart_command_drops_resume_flags() {
@@ -555,9 +555,9 @@ test_primary_restart_command_drops_resume_flags() {
   pass "primary relaunch drops --resume/--continue/-r/-c and alerts when no launch command was recorded"
 }
 
-test_primary_alerts_when_unread_or_busy() {
+test_primary_defers_when_not_at_idle_boundary() {
   local home transcript
-  home=$(new_home primary-alert)
+  home=$(new_home primary-defer)
   STATE="$home/state"; CONFIG="$home/config"
   transcript="$home/primary.jsonl"
   latest_user_usage "$transcript"
@@ -571,12 +571,26 @@ launch_command=claude
 EOF
   fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
   fm_bctx_check_primary 40
-  [ ! -e "$STATE/launch-command" ] || fail "primary restarted despite an unread user transcript tail"
-  grep -Fq 'context-alert' "$STATE/babysitter-findings.jsonl" \
-    || fail "unread primary tail did not alert"
-  grep -Fq 'babysitter-context:primary' "$STATE/wakes" \
-    || fail "unread primary tail did not queue a wake"
-  pass "primary over-threshold condition alerts instead of restarting when no safe idle boundary is proven"
+  [ ! -e "$STATE/launch-command" ] || fail "primary restarted before an idle boundary"
+  [ ! -e "$STATE/wakes" ] || fail "primary queued a wake before an idle boundary"
+  [ ! -e "$STATE/babysitter-findings.jsonl" ] || fail "primary recorded a finding before an idle boundary"
+  pass "primary over threshold but not at an idle boundary does nothing: no restart, finding, or wake"
+}
+
+test_primary_relaunch_shape_check() {
+  local home
+  home=$(new_home primary-shape)
+  STATE="$home/state"; CONFIG="$home/config"
+  printf 'placement=tmux\ncwd=%s\nlaunch_command=claude --allow-dangerously-skip-permissions --effort high\n' "$home" > "$home/real"
+  [ "$(fm_bctx_primary_restart_command "$home/real")" = "cd '$home' && exec claude --allow-dangerously-skip-permissions --effort high" ] \
+    || fail "the captain's real primary launch line was refused"
+  printf 'placement=tmux\ncwd=%s\nlaunch_command=claude --append-system-prompt Follow AGENTS.md\n' "$home" > "$home/prompt"
+  fm_bctx_primary_restart_command "$home/prompt" >/dev/null && fail "a flattened multi-word system prompt was replayed"
+  printf 'placement=tmux\ncwd=%s\nlaunch_command=claude --model sonnet Follow up\n' "$home" > "$home/positional"
+  fm_bctx_primary_restart_command "$home/positional" >/dev/null && fail "a positional prompt after a flag value was replayed"
+  printf 'placement=tmux\ncwd=%s\nlaunch_command=claude -p hello\n' "$home" > "$home/print"
+  fm_bctx_primary_restart_command "$home/print" >/dev/null && fail "a free-text print flag was replayed"
+  pass "primary relaunch replays the captain's real launch line and refuses flattened free-text arguments"
 }
 
 test_primary_state_hook_records_busy_and_idle() {
@@ -615,5 +629,6 @@ test_worker_turn_transcript_record_keeps_stop_payload_path
 test_primary_terminal_restart_uses_recorded_tty
 test_primary_terminal_never_types_launch_into_live_session
 test_primary_terminal_alerts_when_tab_changed_since_idle
-test_primary_alerts_when_unread_or_busy
+test_primary_defers_when_not_at_idle_boundary
+test_primary_relaunch_shape_check
 test_primary_state_hook_records_busy_and_idle

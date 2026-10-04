@@ -282,6 +282,20 @@ fm_bctx_fresh_launch_command() {  # <launch-command>
     kept+=("$word")
   done
   [ "${#kept[@]}" -gt 0 ] || return 1
+  local expect_value=0 name
+  for word in "${kept[@]:1}"; do
+    case "$word" in
+      -*)
+        name=${word%%=*}
+        case "$name" in --append-system-prompt|--system-prompt|-p|--print) return 1 ;; esac
+        case "$word" in *=*) expect_value=0 ;; *) expect_value=1 ;; esac
+        ;;
+      *)
+        [ "$expect_value" = 1 ] || return 1
+        expect_value=0
+        ;;
+    esac
+  done
   printf '%s\n' "${kept[*]}"
 }
 
@@ -440,20 +454,20 @@ fm_bctx_restart_primary() {  # <placement-record>
 }
 
 fm_bctx_check_primary() {  # <threshold>
-  local threshold=$1 transcript usage percent used window source key marker summary placement_record
+  local threshold=$1 transcript usage percent key marker summary placement_record
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   transcript=$(fm_bctx_primary_transcript) || return 0
   usage=$(fm_bctx_usage_from_transcript "$transcript" 2>/dev/null) || return 0
-  IFS=$'\t' read -r percent used window source <<EOF
+  IFS=$'\t' read -r percent _ <<EOF
 $usage
 EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
   [ "$percent" -ge "$threshold" ] || return 0
-  key="$transcript:$used:$window"
+  key=$transcript
   marker="$STATE/babysitter-context/primary.relaunch"
   fm_bctx_marker_seen "$marker" "$key" && return 0
-  if fm_bctx_primary_idle_boundary "$transcript" \
-     && placement_record=$(fm_bctx_primary_placement_record) \
+  fm_bctx_primary_idle_boundary "$transcript" || return 0
+  if placement_record=$(fm_bctx_primary_placement_record) \
      && fm_bctx_restart_primary "$placement_record"; then
     summary="primary firstmate context ${percent}% >= ${threshold}%; restarted into a fresh session at idle boundary"
     fm_bctx_append_finding context-relaunch "$summary"

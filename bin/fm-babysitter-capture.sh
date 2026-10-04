@@ -52,6 +52,7 @@ PLACEMENT_TMP="$STATE/.babysitter-primary-placement.tmp.$$"
     terminal_hash=$(fm_bctx_terminal_contents_hash "$tty_name" || true)
     [ -z "$terminal_hash" ] || printf 'terminal_contents_hash=%s\n' "$terminal_hash"
   fi
+  case "$cmd_line" in *$'\n'*) cmd_line= ;; esac
   [ -z "$cmd_line" ] || printf 'launch_command=%s\n' "$cmd_line"
 } > "$PLACEMENT_TMP" 2>/dev/null && mv -f "$PLACEMENT_TMP" "$STATE/.babysitter-primary-placement" 2>/dev/null || true
 rm -f "$PLACEMENT_TMP" 2>/dev/null || true

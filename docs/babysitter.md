@@ -3,7 +3,7 @@
 The babysitter catches firstmate telling the captain it will do something and then not doing it: a stated commitment that never turns into action, a captain instruction firstmate never acknowledged or acted on, or work that is nominally under way but shows no visible progress for a long stretch. It is a third, independent observer beside the turn-end guard (which only checks "is a supervision cycle armed") and the watcher (which only watches crew liveness) - neither of those looks at whether firstmate's own stated intentions become actions.
 
 It has three parts: a deterministic capture hook that records the dialog, a persistent judge agent that reads it and decides, and a two-tier escalation ladder.
-A fourth, fully deterministic path (PARKED AT CHECKPOINT, below) and a deterministic context-size guard need no judge at all.
+A fourth, fully deterministic path (PARKED AT CHECKPOINT, below) needs no judge at all.
 
 Capture and PARKED AT CHECKPOINT run unconditionally in a genuine primary checkout. The judge itself is opt-in: create `config/babysitter-enabled` once (see [`configuration.md`](configuration.md)) to have session start spawn and thereafter maintain it; without that file the judge never spawns and its liveness layer is a true no-op.
 
@@ -59,9 +59,9 @@ Never read your own findings store from the start either; if you need to check w
 
 `bin/fm-babysitter-ntfy.sh` is the single tier-2 sender, used by both the judge and the deterministic parked-checkpoint path. It reads the ntfy topic fresh from `config/babysitter-ntfy-topic` (absent = tier 2 disabled), rate-limits each reason (`unmet-commitment`, `parked-checkpoint`, `judge-down`) independently to one send per `FM_BABYSITTER_NTFY_COOLDOWN_SECS` (default 1800s) so one condition's push cannot suppress a different condition's push, and only ever sends one of three fixed templates with a plain count and a plain age in seconds interpolated - no chat content, project name, task id, PR URL, or file path can reach the payload, because the CLI has no parameter that accepts one.
 
-## Context-Size Guard (deterministic, no judge)
+## Context-Size Guard (deterministic, runs from the babysitter watcher poll)
 
-`bin/fm-babysitter-context-lib.sh` runs from the same `state/babysitter.check.sh` watcher poll as judge liveness and cadence.
+`bin/fm-babysitter-context-lib.sh` runs from the `state/babysitter.check.sh` watcher poll that the babysitter opt-in (`config/babysitter-enabled`) registers, alongside judge liveness and cadence; without that file the guard does not run.
 It measures the primary firstmate transcript recorded by the capture hook and every live task.
 For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against a 200,000-token basis for every model, so the default 40 percent threshold is 80,000 tokens everywhere; `[1m]` models are not given a larger window.
 A Claude worker's transcript path is recorded by its Stop hook in `state/<id>.turn-transcript` and removed by teardown; when no transcript is recorded (before its first turn, or for a harness without one) the guard falls back to a rendered context percentage from the pane.
@@ -79,8 +79,9 @@ Both paths send the harness exit command first, then relaunch the recorded comma
 The Terminal.app path also requires the tab contents to match the idle fingerprint immediately before restart, and types the relaunch command only after the recorded primary process has exited; if it has not exited within the bounded wait, nothing further is typed and the guard alerts.
 Success is recorded only after a bounded check that the replacement session started: a new live foreground agent in the tmux pane, or a new process running the same executable on the Terminal.app tty.
 If that check times out, the guard alerts once per transcript state and retries on the next poll without recording success.
-The recorded launch command comes from `ps` output, which has lost its original quoting; the guard replays it only when every word is plain (letters, digits, and `_./:=@%+,-`). Any other character, such as parentheses or a space inside an argument, makes the guard type nothing and alert for a manual restart with the context percentage.
-If the placement, lifecycle state, transcript tail, composer state, or relaunch command is not proven safe, the guard records a durable finding and queues a `check:` wake instead of acting.
+The recorded launch command comes from `ps` output, which has lost its original quoting; the guard replays it only when its shape is unambiguous: after the executable, every token is a flag (`-x`, `--name`, or `--name=value`) or a single value right after a flag, and every character is plain (letters, digits, and `_./:=@%+,-`, plus the separating spaces). It refuses, typing nothing and alerting for a manual restart with the context percentage, when two non-flag tokens appear in a row (a multi-word value or a positional prompt), when a free-text flag (`--append-system-prompt`, `--system-prompt`, `-p`, `--print`) is present, or when the command contains any other character.
+A primary over threshold that is not at an idle boundary is left alone: no finding, no wake, no alert, and the next idle poll restarts it.
+At an idle boundary, if the placement, transcript tail, composer state, relaunch command, or replacement session cannot be proven, the guard records one durable alert per transcript and queues a `check:` wake instead of acting, and retries on the next poll.
 
 ## Liveness and persistence guarantees
 
