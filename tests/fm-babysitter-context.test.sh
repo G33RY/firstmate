@@ -64,6 +64,70 @@ EOF
   pass "transcript usage counts input plus cache tokens against one fixed 200k basis for every model"
 }
 
+test_usage_ignores_sidechain_rows() {
+  local file out percent
+  file="$TMP_ROOT/sidechain.jsonl"
+  cat > "$file" <<'EOF'
+{"type":"assistant","message":{"role":"assistant","model":"claude-test","usage":{"input_tokens":90000},"content":"main"}}
+{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-test","usage":{"input_tokens":1000},"content":"sub-agent"}}
+EOF
+  out=$(fm_bctx_usage_from_transcript "$file") || fail "usage parse failed with a sidechain row"
+  percent=${out%%$'\t'*}
+  [ "$percent" = 45 ] || fail "a sub-agent row set the measured context instead of the main chain: $out"
+  pass "usage is measured from the main chain, never from a sub-agent sidechain row"
+}
+
+test_threshold_boundary_is_exact() {
+  local file out percent
+  file="$TMP_ROOT/boundary.jsonl"
+  assistant_usage "$file" 79999
+  out=$(fm_bctx_usage_from_transcript "$file") || fail "boundary parse failed"
+  percent=${out%%$'\t'*}
+  [ "$percent" = 39 ] || fail "79999 tokens must stay under 40 percent of the 200k basis: $out"
+  assistant_usage "$file" 80000
+  out=$(fm_bctx_usage_from_transcript "$file") || fail "boundary parse failed"
+  percent=${out%%$'\t'*}
+  [ "$percent" = 40 ] || fail "80000 tokens must read as exactly 40 percent of the 200k basis: $out"
+  pass "the 40 percent threshold trips exactly at 80,000 tokens of the 200k basis"
+}
+
+test_pane_sourced_worker_alert_names_reported_window() {
+  local home wt control crew findings
+  home=$(new_home worker-pane-basis)
+  STATE="$home/state"; CONFIG="$home/config"
+  wt="$home/wt"
+  mkdir -p "$wt"
+  cat > "$STATE/t5.meta" <<EOF
+kind=ship
+backend=fake
+window=target
+worktree=$wt
+spawn_gen=gen-5
+EOF
+  control="$home/control"
+  printf '#!/usr/bin/env bash\nexit 9\n' > "$control"
+  chmod +x "$control"
+  crew="$home/crew-state"
+  printf '#!/usr/bin/env bash\nprintf '"'"'state: parked · source: run-step · awaiting gate\\n'"'"'\n' > "$crew"
+  chmod +x "$crew"
+  fm_backend_of_meta() { printf 'fake'; }
+  fm_backend_target_of_meta() { printf 'target'; }
+  fm_backend_agent_state() { printf 'alive'; }
+  fm_backend_capture() { printf 'Context 45%% used\n'; }
+  fm_wake_append() { return 0; }
+  FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$crew" \
+    FM_BABYSITTER_CONTEXT_CONTROL_BIN="$control" fm_bctx_check_worker t5 40
+  findings=$(grep 'context-alert' "$STATE/babysitter-findings.jsonl" || true)
+  case "$findings" in
+    *"of the reported window"*) ;;
+    *) fail "a pane-sourced alert did not name the reported window: $findings" ;;
+  esac
+  case "$findings" in
+    *"200k basis"*) fail "a pane-sourced alert claimed the 200k basis: $findings" ;;
+  esac
+  pass "a pane-sourced worker alert names the harness-reported window instead of the 200k basis"
+}
+
 test_transcript_usage_found_past_tail_window() {
   local usage_line file out percent
   usage_line="$TMP_ROOT/usage-line.jsonl"
@@ -739,6 +803,9 @@ test_primary_state_hook_records_busy_and_idle() {
 }
 
 test_transcript_usage_counts_cache_tokens
+test_usage_ignores_sidechain_rows
+test_threshold_boundary_is_exact
+test_pane_sourced_worker_alert_names_reported_window
 test_transcript_usage_found_past_tail_window
 test_pane_fallback_reads_context_percent
 test_threshold_config_defaults_and_clamps

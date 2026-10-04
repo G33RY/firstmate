@@ -63,7 +63,7 @@ Never read your own findings store from the start either; if you need to check w
 
 `bin/fm-babysitter-context-lib.sh` runs from the `state/babysitter.check.sh` watcher poll that the babysitter opt-in (`config/babysitter-enabled`) registers, alongside judge liveness and cadence; without that file the guard does not run.
 It measures the primary firstmate transcript recorded by the capture hook and every live task.
-For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against a 200,000-token basis for every model, so the default 40 percent threshold is 80,000 tokens everywhere; `[1m]` models are not given a larger window. Percentages in findings and alerts are always stated as of that 200k basis, never as the model's real window.
+For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against a 200,000-token basis for every model, so the default 40 percent threshold is 80,000 tokens everywhere; `[1m]` models are not given a larger window. Findings and alerts name the basis they used: a transcript measurement says "of a 200k basis", and a harness that reports its own percent in the pane says "of the reported window", compared at the same threshold against its real window.
 A Claude worker's transcript path is recorded by its Stop hook in `state/<id>.turn-transcript` and removed by teardown; when no transcript is recorded (before its first turn, or for a harness without one) the guard falls back to a rendered context percentage from the pane.
 `config/babysitter-context-threshold-percent` sets a home-local integer override of the 40 percent default.
 

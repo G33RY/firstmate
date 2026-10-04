@@ -40,7 +40,7 @@ fm_bctx_usage_row() {  # reads transcript JSONL on stdin; prints the last assist
   jq -Rr '
     def n: if type == "number" then . else 0 end;
     fromjson?
-    | select(type == "object" and .type == "assistant")
+    | select(type == "object" and .type == "assistant" and (.isSidechain // false) != true)
     | .message.usage? // empty
     | ((.input_tokens? // null | n) + (.cache_creation_input_tokens? // null | n) + (.cache_read_input_tokens? // null | n)) as $used
     | select($used > 0)
@@ -65,7 +65,7 @@ fm_bctx_usage_from_transcript() {  # <transcript>
   command -v jq >/dev/null 2>&1 || return 1
   used=$(fm_bctx_last_row fm_bctx_usage_row "$transcript")
   case "$used" in ''|*[!0-9]*) return 1 ;; esac
-  percent=$(( (used * 100 + FM_BABYSITTER_CONTEXT_WINDOW - 1) / FM_BABYSITTER_CONTEXT_WINDOW ))
+  percent=$(( used * 100 / FM_BABYSITTER_CONTEXT_WINDOW ))
   printf '%s\t%s\t%s\ttranscript:%s\n' "$percent" "$used" "$FM_BABYSITTER_CONTEXT_WINDOW" "$transcript"
 }
 
@@ -133,8 +133,8 @@ fm_bctx_pr_from_status() {  # <id>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$log" 2>/dev/null | tail -1
 }
 
-fm_bctx_progress_note() {  # <id> <meta> <percent> <threshold>
-  local id=$1 meta=$2 percent=$3 threshold=$4 wt branch head pr status
+fm_bctx_progress_note() {  # <id> <meta> <percent> <threshold> <basis>
+  local id=$1 meta=$2 percent=$3 threshold=$4 basis=$5 wt branch head pr status
   wt=$(fm_bctx_meta_get "$meta" worktree)
   status=$(fm_bctx_status_line "$id")
   branch=unknown
@@ -145,8 +145,8 @@ fm_bctx_progress_note() {  # <id> <meta> <percent> <threshold>
   fi
   pr=$(fm_bctx_pr_from_status "$id" || true)
   [ -n "$pr" ] || pr=none
-  printf 'Context threshold reached (%s%% of a 200k basis >= %s%%). Durable state before relaunch: latest_status=%s; branch=%s; head=%s; pr=%s.' \
-    "$percent" "$threshold" "$status" "$branch" "$head" "$pr"
+  printf 'Context threshold reached (%s%% %s >= %s%%). Durable state before relaunch: latest_status=%s; branch=%s; head=%s; pr=%s.' \
+    "$percent" "$basis" "$threshold" "$status" "$branch" "$head" "$pr"
 }
 
 
@@ -174,7 +174,7 @@ fm_bctx_marker_seen() {  # <marker> <key>
 
 fm_bctx_check_worker() {  # <id> <threshold>
   local id=$1 threshold=$2 meta="$STATE/$1.meta"
-  local backend target agent_state usage percent used window source key marker current state wt note control_bin failure failure_key
+  local backend target agent_state usage percent used window source key marker current state wt note control_bin failure failure_key basis
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   [ -f "$meta" ] || return 0
   [ "$(fm_bctx_meta_get "$meta" kind)" != babysitter ] || return 0
@@ -189,6 +189,8 @@ fm_bctx_check_worker() {  # <id> <threshold>
 $usage
 EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
+  basis="of a 200k basis"
+  case "$source" in pane) basis="of the reported window" ;; esac
   if [ "$percent" -lt "$threshold" ]; then
     rm -f "$STATE/babysitter-context/$id.alert" 2>/dev/null || true
     return 0
@@ -204,20 +206,20 @@ EOF
       marker="$STATE/babysitter-context/$id.deferred"
       fm_bctx_marker_seen "$marker" "$key" && return 0
       printf '%s\n' "$key" > "$marker" 2>/dev/null || true
-      fm_bctx_append_finding context-deferred "worker $id context ${percent}% (of a 200k basis) >= ${threshold}% but current state is ${state:-unknown}; relaunch deferred"
+      fm_bctx_append_finding context-deferred "worker $id context ${percent}% (${basis}) >= ${threshold}% but current state is ${state:-unknown}; relaunch deferred"
       return 0
       ;;
   esac
   failure="$STATE/babysitter-context/$id.alert"
   failure_key="$key|$(fm_bctx_status_line "$id")"
   fm_bctx_marker_seen "$failure" "$failure_key" && return 0
-  note=$(fm_bctx_progress_note "$id" "$meta" "$percent" "$threshold")
+  note=$(fm_bctx_progress_note "$id" "$meta" "$percent" "$threshold" "$basis")
   control_bin=${FM_BABYSITTER_CONTEXT_CONTROL_BIN:-"$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-control.sh"}
   if FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-}}" FM_STATE_OVERRIDE="$STATE" "$control_bin" "$id" relaunch --note "$note" >/dev/null 2>&1; then
-    fm_bctx_append_finding context-relaunch "worker $id context ${percent}% (of a 200k basis) >= ${threshold}%; relaunched at idle boundary"
+    fm_bctx_append_finding context-relaunch "worker $id context ${percent}% (${basis}) >= ${threshold}%; relaunched at idle boundary"
     printf '%s\n' "$key" > "$marker" 2>/dev/null || true
   else
-    fm_bctx_append_finding context-alert "worker $id context ${percent}% (of a 200k basis) >= ${threshold}% but relaunch failed"
+    fm_bctx_append_finding context-alert "worker $id context ${percent}% (${basis}) >= ${threshold}% but relaunch failed"
     fm_bctx_wake "babysitter-context:$id" "babysitter could not relaunch worker $id after context reached ${percent}%"
     printf '%s\n' "$failure_key" > "$failure" 2>/dev/null || true
   fi
