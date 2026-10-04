@@ -30,9 +30,16 @@ fm_bctx_threshold_percent() {
 }
 
 fm_bctx_last_row() {  # <reader> <transcript>
-  local reader=$1 transcript=$2 row
-  row=$(tail -c "$FM_BABYSITTER_CONTEXT_TAIL_BYTES" "$transcript" 2>/dev/null | "$reader")
-  [ -n "$row" ] || row=$("$reader" < "$transcript")
+  local reader=$1 transcript=$2 row bytes size
+  size=$(wc -c < "$transcript" 2>/dev/null || echo 0)
+  size=${size//[[:space:]]/}
+  bytes=$FM_BABYSITTER_CONTEXT_TAIL_BYTES
+  while :; do
+    row=$(tail -c "$bytes" "$transcript" 2>/dev/null | "$reader")
+    [ -n "$row" ] && break
+    [ "$bytes" -lt "$size" ] || break
+    bytes=$(( bytes * 2 ))
+  done
   printf '%s\n' "$row"
 }
 
@@ -73,8 +80,8 @@ fm_bctx_usage_from_pane() {  # <backend> <target> <label>
   local backend=$1 target=$2 label=$3 text line number percent
   command -v fm_backend_capture >/dev/null 2>&1 || return 1
   text=$(fm_backend_capture "$backend" "$target" 80 "$label" 2>/dev/null) || return 1
-  line=$(printf '%s\n' "$text" \
-    | grep -Eo '(Ctx:|Context)[[:space:]]*[0-9]+%[[:space:]]*(used|left)' | tail -1) || true
+  line=$(printf '%s\n' "$text" | tail -n 5 \
+    | grep -Eo 'Ctx:[[:space:]]*[0-9]+%[[:space:]]*used|Context[[:space:]]*[0-9]+%[[:space:]]*left' | tail -1) || true
   number=$(printf '%s' "$line" | sed -E 's/^[^0-9]*([0-9]+)%.*$/\1/')
   case "$number" in ''|*[!0-9]*) return 1 ;; esac
   case "$line" in

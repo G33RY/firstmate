@@ -113,7 +113,7 @@ EOF
   fm_backend_of_meta() { printf 'fake'; }
   fm_backend_target_of_meta() { printf 'target'; }
   fm_backend_agent_state() { printf 'alive'; }
-  fm_backend_capture() { printf 'Context 45%% used\n'; }
+  fm_backend_capture() { printf 'Ctx: 45%% used\n'; }
   fm_wake_append() { return 0; }
   FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$crew" \
     FM_BABYSITTER_CONTEXT_CONTROL_BIN="$control" fm_bctx_check_worker t5 40
@@ -149,20 +149,20 @@ test_transcript_usage_found_past_tail_window() {
   pass "transcript usage is read from a bounded tail and falls back to a full scan when the tail has no usage row"
 }
 
-test_pane_fallback_reads_context_percent() {
+test_pane_fallback_reads_only_the_harness_footer() {
   local out
-  fm_backend_capture() { printf 'junk line\nContext 42%% used\n'; }
-  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "pane used percentage not parsed"
-  [ "${out%%$'\t'*}" = 42 ] || fail "pane used percentage was wrong: $out"
-  fm_backend_capture() { printf 'Context 10%% used\nContext 42%% used\n'; }
-  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "pane with two readouts not parsed"
-  [ "${out%%$'\t'*}" = 42 ] || fail "pane fallback took a stale readout instead of the live one: $out"
-  fm_backend_capture() { printf 'Ctx: 70%% left\n'; }
-  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "pane left percentage not parsed"
-  [ "${out%%$'\t'*}" = 30 ] || fail "pane left percentage was not inverted: $out"
-  fm_backend_capture() { printf 'no context readout here\n'; }
-  fm_bctx_usage_from_pane tmux %1 fm-x >/dev/null && fail "pane fallback invented a percentage"
-  pass "pane fallback parses used and left context readouts with portable tools"
+  fm_backend_capture() { printf 'junk line\nCtx: 42%% used\n'; }
+  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "claude footer used percentage not parsed"
+  [ "${out%%$'\t'*}" = 42 ] || fail "claude footer used percentage was wrong: $out"
+  fm_backend_capture() { printf 'Context 70%% left\n'; }
+  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "codex footer left percentage not parsed"
+  [ "${out%%$'\t'*}" = 30 ] || fail "codex footer left percentage was not inverted: $out"
+  fm_backend_capture() { printf 'Context 45%% left\nprinted text\nmore\nlines\nlines\nlines\nCtx: 10%% used\n'; }
+  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "footer not parsed below printed text"
+  [ "${out%%$'\t'*}" = 10 ] || fail "printed text higher in the pane was measured instead of the footer: $out"
+  fm_backend_capture() { printf 'Context 45%% left\nprinted text\nno footer here\nlines\nlines\nlines\nlines\n'; }
+  fm_bctx_usage_from_pane tmux %1 fm-x >/dev/null && fail "printed text without a footer was measured"
+  pass "pane fallback reads only the harness footer and ignores printed text higher in the pane"
 }
 
 test_threshold_config_defaults_and_clamps() {
@@ -807,7 +807,7 @@ test_usage_ignores_sidechain_rows
 test_threshold_boundary_is_exact
 test_pane_sourced_worker_alert_names_reported_window
 test_transcript_usage_found_past_tail_window
-test_pane_fallback_reads_context_percent
+test_pane_fallback_reads_only_the_harness_footer
 test_threshold_config_defaults_and_clamps
 test_worker_relaunches_once_at_safe_boundary
 test_worker_defers_while_working
