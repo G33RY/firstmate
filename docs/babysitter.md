@@ -63,7 +63,8 @@ Never read your own findings store from the start either; if you need to check w
 
 `bin/fm-babysitter-context-lib.sh` runs from the same `state/babysitter.check.sh` watcher poll as judge liveness and cadence.
 It measures the primary firstmate transcript recorded by the capture hook and every live task record under `state/*.meta`.
-For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against the model context window; when no transcript is reachable it falls back to a rendered context percentage from the pane.
+For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against the context window, which is chosen from the model id: a `[1m]` model uses 1,000,000 tokens and every other model 200,000.
+When no transcript is reachable it falls back to a rendered context percentage from the pane.
 The default threshold is 40 percent and `config/babysitter-context-threshold-percent` sets a home-local integer override.
 
 For a live worker at or above the threshold, the guard relaunches only after `bin/fm-crew-state.sh <id>` reports an idle boundary state and no full-gate lock is visible in that worktree's `.no-mistakes` state.
@@ -72,10 +73,10 @@ The guard records the task's current spawn generation before acting and will not
 If a worker is over threshold but still working, or a full-gate lock is present, it records one deferred finding for that generation and waits for a later poll.
 
 For the primary firstmate, the tracked Claude hooks record a busy/idle breadcrumb and the capture hook records the transcript path plus the primary placement when it can prove one.
-The guard restarts only when the newest transcript turn is an assistant turn, the lifecycle breadcrumb is idle, and the placement has a supported restart command.
+The guard restarts only when the newest transcript turn is an assistant turn with no unresolved `tool_use`, the lifecycle breadcrumb is idle, and the placement has a supported restart command.
 Supported placements are a tmux pane recorded from `$TMUX_PANE` and a macOS Terminal.app tab recorded by its tty plus a tab-content fingerprint from the idle hook.
-Both paths send the harness exit command first, then relaunch the recorded command from the recorded checkout so session start rebuilds from durable state in a fresh context.
-The Terminal.app path also requires the tab contents to match the idle fingerprint immediately before restart, so a draft typed after the idle breadcrumb turns into an alert instead of a relaunch.
+Both paths send the harness exit command first, then relaunch the recorded command from the recorded checkout with resume and continue flags dropped, so session start rebuilds from durable state in a fresh context.
+The Terminal.app path also requires the tab contents to match the idle fingerprint immediately before restart, and types the relaunch command only after the recorded primary process has exited; if it has not exited within the bounded wait, nothing further is typed and the guard alerts.
 If the placement, lifecycle state, transcript tail, composer state, or relaunch command is not proven safe, the guard records a durable finding and queues a `check:` wake instead of acting.
 
 ## Liveness and persistence guarantees

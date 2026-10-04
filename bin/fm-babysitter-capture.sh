@@ -17,36 +17,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-babysitter-context-lib.sh
+. "$SCRIPT_DIR/fm-babysitter-context-lib.sh"
 
 MARKER="$STATE/.babysitter-capture-error"
 note_error() { # <reason>
   { printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$1" > "$MARKER.tmp.$$" \
       && mv -f "$MARKER.tmp.$$" "$MARKER"; } 2>/dev/null || true
   rm -f "$MARKER.tmp.$$" 2>/dev/null || true
-}
-
-terminal_contents_hash() {  # <tty>
-  local tty=$1 contents
-  [ "$(uname 2>/dev/null)" = Darwin ] || return 1
-  command -v osascript >/dev/null 2>&1 || return 1
-  contents=$(osascript - "$tty" <<'OSA' 2>/dev/null
-on run argv
-  set targetTTY to item 1 of argv
-  tell application "Terminal"
-    repeat with w in windows
-      repeat with t in tabs of w
-        set tabTTY to tty of t as text
-        if tabTTY is targetTTY or tabTTY is "/dev/" & targetTTY or "/dev/" & tabTTY is targetTTY then
-          return contents of t as text
-        end if
-      end repeat
-    end repeat
-  end tell
-  error "terminal tty not found"
-end run
-OSA
-  ) || return 1
-  printf '%s' "$contents" | cksum | awk '{print $1 ":" $2}'
 }
 
 PAYLOAD=$(cat 2>/dev/null || true)
@@ -75,7 +53,7 @@ PLACEMENT_TMP="$STATE/.babysitter-primary-placement.tmp.$$"
   [ -z "${TMUX_PANE:-}" ] || printf 'placement=tmux\nbackend=tmux\ntarget=%s\n' "$TMUX_PANE"
   if [ -z "${TMUX_PANE:-}" ] && [ "${TERM_PROGRAM:-}" = Apple_Terminal ] && [ -n "$tty_name" ]; then
     printf 'placement=terminal\nbackend=terminal-app\ntty=%s\n' "$tty_name"
-    terminal_hash=$(terminal_contents_hash "$tty_name" || true)
+    terminal_hash=$(fm_bctx_terminal_contents_hash "$tty_name" || true)
     [ -z "$terminal_hash" ] || printf 'terminal_contents_hash=%s\n' "$terminal_hash"
   fi
   [ -z "$cmd_line" ] || printf 'launch_command=%s\n' "$cmd_line"

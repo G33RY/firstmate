@@ -236,7 +236,7 @@ It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): prese
 The context guard records over-threshold actions in the babysitter findings store and rate-limits worker relaunches to once per task spawn generation.
 Primary firstmate restarts are allowed only from a supported placement breadcrumb recorded by the primary hooks: tmux via `$TMUX_PANE`, or macOS Terminal.app via the tab tty and idle tab-content fingerprint.
 The guard also requires an idle lifecycle breadcrumb and an assistant transcript tail before it sends the harness exit command and relaunches the recorded command from the recorded checkout.
-If the recorded launch command is unavailable or contains a resume/continue flag, `config/babysitter-primary-restart-command` may provide the exact fresh-session command to run instead.
+The relaunch uses the recorded launch command with any `--resume`, `--continue`, `-r`, or `-c` flag dropped so the fresh session does not reload the old context; if no launch command was recorded, the guard alerts instead of guessing.
 When any boundary cannot be proven, the guard alerts through the babysitter findings and wake path rather than controlling the primary.
 See [`babysitter.md`](babysitter.md) for the full contract, including exactly what survives a session end, a context clear, a reboot, or a terminal-server death.
 
