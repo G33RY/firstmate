@@ -25,8 +25,9 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 TMP="$STATE/.babysitter-primary-busy.tmp.$$"
 {
   printf 'state=%s\n' "$STATE_WORD"
-  printf 'event=%s\n' "$EVENT"
-  printf 'epoch=%s\n' "$(date +%s 2>/dev/null || echo 0)"
 } > "$TMP" 2>/dev/null && mv -f "$TMP" "$STATE/.babysitter-primary-busy" 2>/dev/null || true
 rm -f "$TMP" 2>/dev/null || true
+if [ "$STATE_WORD" = idle ] && [ "$EVENT" = session-end ]; then
+  rm -f "$STATE/.babysitter-primary-placement" 2>/dev/null || true
+fi
 exit 0

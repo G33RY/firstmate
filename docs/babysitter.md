@@ -67,16 +67,17 @@ For Claude Code transcripts it reads the newest assistant message usage from JSO
 A Claude worker's transcript path is recorded by its Stop hook in `state/<id>.turn-transcript` and removed by teardown; when no transcript is recorded (before its first turn, or for a harness without one) the guard falls back to a rendered context percentage from the pane.
 `config/babysitter-context-threshold-percent` sets a home-local integer override of the 40 percent default.
 
-For a live worker at or above the threshold, the guard relaunches only after `bin/fm-crew-state.sh <id>` reports an idle boundary state and no full-gate lock is visible in that worktree's `.no-mistakes` state.
+For a live worker at or above the threshold, the guard relaunches only after `bin/fm-crew-state.sh <id>` reports a parked, blocked, or paused boundary, which keeps relaunches away from active drive.
 The relaunch goes through `bin/fm-control.sh <id> relaunch --note ...`, and the note is built only from durable state: latest status event, branch, head, and PR URL if one is present.
 The guard records the task's current spawn generation before acting and will not relaunch that same generation twice.
-If a worker is over threshold but still working, or a full-gate lock is present, it records one deferred finding for that generation and waits for a later poll.
+If a worker is over threshold but still working, it records one deferred finding for that generation and waits for a later poll.
 
 For the primary firstmate, the tracked Claude hooks record a busy/idle breadcrumb and the capture hook records the transcript path plus the primary placement when it can prove one.
 The guard restarts only when the newest transcript turn is an assistant turn with no unresolved `tool_use`, the lifecycle breadcrumb is idle, and the placement has a supported restart command.
 Supported placements are a tmux pane recorded from `$TMUX_PANE` and a macOS Terminal.app tab recorded by its tty plus a tab-content fingerprint from the idle hook.
 Both paths send the harness exit command first, then relaunch the recorded command from the recorded checkout with resume and continue flags dropped, so session start rebuilds from durable state in a fresh context.
 The Terminal.app path also requires the tab contents to match the idle fingerprint immediately before restart, and types the relaunch command only after the recorded primary process has exited; if it has not exited within the bounded wait, nothing further is typed and the guard alerts.
+Before `/exit` is sent the guard writes a restart-attempt record for that transcript; a retry never sends `/exit` or the launch command again for the same transcript, it only re-verifies the replacement, so a slow-starting replacement is recorded as success on a later poll without a second exit.
 Success is recorded only after a bounded check that the replacement session started: a new live foreground agent in the tmux pane, or a new process running the same executable on the Terminal.app tty.
 If that check times out, the guard alerts once per transcript state and retries on the next poll without recording success.
 The recorded launch command comes from `ps` output, which has lost its original quoting; the guard replays it only when its shape is unambiguous: after the executable, every token is a flag (`-x`, `--name`, or `--name=value`) or a single value right after a flag, and every character is plain (letters, digits, and `_./:=@%+,-`, plus the separating spaces). It refuses, typing nothing and alerting for a manual restart with the context percentage, when two non-flag tokens appear in a row (a multi-word value or a positional prompt), when a free-text flag (`--append-system-prompt`, `--system-prompt`, `-p`, `--print`) is present, or when the command contains any other character.

@@ -74,7 +74,7 @@ fm_bctx_usage_from_pane() {  # <backend> <target> <label>
   command -v fm_backend_capture >/dev/null 2>&1 || return 1
   text=$(fm_backend_capture "$backend" "$target" 80 "$label" 2>/dev/null) || return 1
   line=$(printf '%s\n' "$text" \
-    | grep -Eo '(Ctx:|Context)[[:space:]]*[0-9]+%[[:space:]]*(used|left)' | head -1) || true
+    | grep -Eo '(Ctx:|Context)[[:space:]]*[0-9]+%[[:space:]]*(used|left)' | tail -1) || true
   number=$(printf '%s' "$line" | sed -E 's/^[^0-9]*([0-9]+)%.*$/\1/')
   case "$number" in ''|*[!0-9]*) return 1 ;; esac
   case "$line" in
@@ -149,18 +149,6 @@ fm_bctx_progress_note() {  # <id> <meta> <percent> <threshold>
     "$percent" "$threshold" "$status" "$branch" "$head" "$pr"
 }
 
-fm_bctx_full_gate_lock_present() {  # <worktree>
-  local wt=$1 lock=${FM_BABYSITTER_CONTEXT_FULL_GATE_LOCK:-/tmp/fm-full-gate.lock}
-  if [ -e "$lock" ]; then
-    if command -v lockf >/dev/null 2>&1; then
-      lockf -k -t 0 "$lock" true >/dev/null 2>&1 || return 0
-    else
-      return 0
-    fi
-  fi
-  [ -n "$wt" ] && [ -d "$wt/.no-mistakes" ] || return 1
-  find "$wt/.no-mistakes" -maxdepth 4 \( -name '*full*gate*.lock' -o -name '*gate*.lock' \) -print -quit 2>/dev/null | grep -q .
-}
 
 fm_bctx_crew_state() {  # <id>
   local crew_state_bin=${FM_BABYSITTER_CONTEXT_CREW_STATE_BIN:-"$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-crew-state.sh"}
@@ -217,14 +205,6 @@ EOF
       return 0
       ;;
   esac
-  wt=$(fm_bctx_meta_get "$meta" worktree)
-  if fm_bctx_full_gate_lock_present "$wt"; then
-    marker="$STATE/babysitter-context/$id.full-gate"
-    fm_bctx_marker_seen "$marker" "$key" && return 0
-    printf '%s\n' "$key" > "$marker" 2>/dev/null || true
-    fm_bctx_append_finding context-deferred "worker $id context ${percent}% >= ${threshold}% but a full-gate lock is present; relaunch deferred"
-    return 0
-  fi
   note=$(fm_bctx_progress_note "$id" "$meta" "$percent" "$threshold")
   control_bin=${FM_BABYSITTER_CONTEXT_CONTROL_BIN:-"$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-control.sh"}
   if FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-}}" FM_STATE_OVERRIDE="$STATE" "$control_bin" "$id" relaunch --note "$note" >/dev/null 2>&1; then
@@ -306,7 +286,7 @@ fm_bctx_primary_restart_command() {  # <placement-record>
   case "$command" in *[!A-Za-z0-9_./:=@%+,\ -]*) return 1 ;; esac
   cwd=$(fm_bctx_record_get "$record" cwd || true)
   [ -n "$cwd" ] || cwd="$FM_BABYSITTER_CONTEXT_LIB_DIR/.."
-  printf 'cd %s && exec %s\n' "$(fm_bctx_shell_quote "$cwd")" "$command"
+  printf 'cd %s && %s\n' "$(fm_bctx_shell_quote "$cwd")" "$command"
 }
 
 fm_bctx_primary_executable() {  # <placement-record>
@@ -351,8 +331,14 @@ fm_bctx_tty_session_started() {  # <tty> <old-pid> <executable>
     | awk -v old="$2" -v exe="$3" '$1 != old && index($0, exe) { found = 1 } END { exit !found }'
 }
 
-fm_bctx_restart_primary_tmux() {  # <placement-record>
-  local record=$1 target launch composer state
+fm_bctx_begin_attempt() {  # <placement-record> <key> <label>
+  local attempt="$STATE/babysitter-context/primary.restart" tmp="$STATE/babysitter-context/primary.restart.tmp.$$"
+  { printf 'key=%s\nlabel=%s\n' "$2" "$3"; cat "$1"; } > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$attempt" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+fm_bctx_restart_primary_tmux() {  # <placement-record> <key> <label>
+  local record=$1 key=$2 label=$3 target launch composer state
   target=$(fm_bctx_record_get "$record" target || true)
   [ -n "$target" ] || return 1
   command -v fm_backend_foreground_agent_state >/dev/null 2>&1 || return 1
@@ -362,12 +348,12 @@ fm_bctx_restart_primary_tmux() {  # <placement-record>
   composer=$(fm_backend_composer_state tmux "$target" "" 2>/dev/null || printf unknown)
   [ "$composer" = empty ] || return 1
   launch=$(fm_bctx_primary_restart_command "$record") || return 1
+  fm_bctx_begin_attempt "$record" "$key" "$label" || return 1
   fm_backend_send_text_submit tmux "$target" /exit 3 0.1 0.5 "" >/dev/null 2>&1 || return 1
   fm_bctx_wait_primary_dead tmux "$target" || return 1
   fm_backend_source tmux || return 1
   fm_backend_tmux_send_literal "$target" "$launch" || return 1
-  fm_backend_tmux_send_key "$target" Enter || return 1
-  fm_bctx_poll 30 fm_bctx_tmux_alive "$target"
+  fm_backend_tmux_send_key "$target" Enter
 }
 
 fm_bctx_terminal_contents() {  # <tty>
@@ -428,8 +414,8 @@ end run
 OSA
 }
 
-fm_bctx_restart_primary_terminal() {  # <placement-record>
-  local record=$1 tty pid launch exe
+fm_bctx_restart_primary_terminal() {  # <placement-record> <key> <label>
+  local record=$1 key=$2 label=$3 tty pid launch exe
   tty=$(fm_bctx_record_get "$record" tty || true)
   [ -n "$tty" ] || return 1
   pid=$(fm_bctx_record_get "$record" pid || true)
@@ -437,25 +423,65 @@ fm_bctx_restart_primary_terminal() {  # <placement-record>
   launch=$(fm_bctx_primary_restart_command "$record") || return 1
   exe=$(fm_bctx_primary_executable "$record") || return 1
   fm_bctx_terminal_contents_unchanged "$record" "$tty" || return 1
+  fm_bctx_begin_attempt "$record" "$key" "$label" || return 1
   fm_bctx_terminal_send "$tty" /exit || return 1
   fm_bctx_poll 30 fm_bctx_pid_gone "$pid" || return 1
-  fm_bctx_terminal_send "$tty" "$launch" || return 1
-  fm_bctx_poll 30 fm_bctx_tty_session_started "$tty" "$pid" "$exe"
+  fm_bctx_terminal_send "$tty" "$launch"
 }
 
-fm_bctx_restart_primary() {  # <placement-record>
+fm_bctx_restart_primary() {  # <placement-record> <key> <label>
   local record=$1 placement
   placement=$(fm_bctx_record_get "$record" placement || true)
   case "$placement" in
-    tmux) fm_bctx_restart_primary_tmux "$record" ;;
-    terminal) fm_bctx_restart_primary_terminal "$record" ;;
+    tmux) fm_bctx_restart_primary_tmux "$record" "$2" "$3" ;;
+    terminal) fm_bctx_restart_primary_terminal "$record" "$2" "$3" ;;
     *) return 1 ;;
   esac
 }
 
+fm_bctx_primary_replacement_started() {  # <attempt-record>
+  local attempt=$1 placement target tty pid exe
+  placement=$(fm_bctx_record_get "$attempt" placement || true)
+  case "$placement" in
+    tmux)
+      target=$(fm_bctx_record_get "$attempt" target || true)
+      fm_bctx_poll 30 fm_bctx_tmux_alive "$target"
+      ;;
+    terminal)
+      tty=$(fm_bctx_record_get "$attempt" tty || true)
+      pid=$(fm_bctx_record_get "$attempt" pid || true)
+      exe=$(fm_bctx_primary_executable "$attempt") || return 1
+      fm_bctx_poll 30 fm_bctx_tty_session_started "$tty" "$pid" "$exe"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_bctx_primary_settle_attempt() {  # <attempt-record>
+  local attempt=$1 key label marker
+  key=$(fm_bctx_record_get "$attempt" key || true)
+  label=$(fm_bctx_record_get "$attempt" label || true)
+  if fm_bctx_primary_replacement_started "$attempt"; then
+    rm -f "$attempt" 2>/dev/null || true
+    fm_bctx_append_finding context-relaunch "$label; restarted into a fresh session at idle boundary"
+    printf '%s\n' "$key" > "$STATE/babysitter-context/primary.relaunch" 2>/dev/null || true
+    return 0
+  fi
+  marker="$STATE/babysitter-context/primary.alert"
+  fm_bctx_marker_seen "$marker" "$key" && return 0
+  fm_bctx_append_finding context-alert "$label; replacement session not seen after restart, restart manually"
+  fm_bctx_wake "babysitter-context:primary" "$label; replacement session not seen after restart"
+  printf '%s\n' "$key" > "$marker" 2>/dev/null || true
+}
+
 fm_bctx_check_primary() {  # <threshold>
-  local threshold=$1 transcript usage percent key marker summary placement_record
+  local threshold=$1 attempt transcript usage percent key marker summary placement_record
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
+  attempt="$STATE/babysitter-context/primary.restart"
+  if [ -f "$attempt" ] && [ ! -L "$attempt" ]; then
+    fm_bctx_primary_settle_attempt "$attempt"
+    return 0
+  fi
   transcript=$(fm_bctx_primary_transcript) || return 0
   usage=$(fm_bctx_usage_from_transcript "$transcript" 2>/dev/null) || return 0
   IFS=$'\t' read -r percent _ <<EOF
@@ -467,17 +493,16 @@ EOF
   marker="$STATE/babysitter-context/primary.relaunch"
   fm_bctx_marker_seen "$marker" "$key" && return 0
   fm_bctx_primary_idle_boundary "$transcript" || return 0
+  summary="primary firstmate context ${percent}% >= ${threshold}%"
   if placement_record=$(fm_bctx_primary_placement_record) \
-     && fm_bctx_restart_primary "$placement_record"; then
-    summary="primary firstmate context ${percent}% >= ${threshold}%; restarted into a fresh session at idle boundary"
-    fm_bctx_append_finding context-relaunch "$summary"
-  else
-    marker="$STATE/babysitter-context/primary.alert"
-    fm_bctx_marker_seen "$marker" "$key" && return 0
-    summary="primary firstmate context ${percent}% >= ${threshold}%; automatic restart not proven safe, restart manually"
-    fm_bctx_append_finding context-alert "$summary"
-    fm_bctx_wake "babysitter-context:primary" "$summary"
+     && fm_bctx_restart_primary "$placement_record" "$key" "$summary"; then
+    fm_bctx_primary_settle_attempt "$attempt"
+    return 0
   fi
+  marker="$STATE/babysitter-context/primary.alert"
+  fm_bctx_marker_seen "$marker" "$key" && return 0
+  fm_bctx_append_finding context-alert "$summary; automatic restart not proven safe, restart manually"
+  fm_bctx_wake "babysitter-context:primary" "$summary; automatic restart not proven safe"
   printf '%s\n' "$key" > "$marker" 2>/dev/null || true
 }
 

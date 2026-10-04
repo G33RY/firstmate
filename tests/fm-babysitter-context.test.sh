@@ -9,7 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$ROOT/bin/fm-babysitter-context-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-babysitter-context)
-FM_BABYSITTER_CONTEXT_FULL_GATE_LOCK="$TMP_ROOT/no-full-gate.lock"
 
 new_home() {  # <name>
   local dir="$TMP_ROOT/$1"
@@ -85,6 +84,9 @@ test_pane_fallback_reads_context_percent() {
   fm_backend_capture() { printf 'junk line\nContext 42%% used\n'; }
   out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "pane used percentage not parsed"
   [ "${out%%$'\t'*}" = 42 ] || fail "pane used percentage was wrong: $out"
+  fm_backend_capture() { printf 'Context 10%% used\nContext 42%% used\n'; }
+  out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "pane with two readouts not parsed"
+  [ "${out%%$'\t'*}" = 42 ] || fail "pane fallback took a stale readout instead of the live one: $out"
   fm_backend_capture() { printf 'Ctx: 70%% left\n'; }
   out=$(fm_bctx_usage_from_pane tmux %1 fm-x) || fail "pane left percentage not parsed"
   [ "${out%%$'\t'*}" = 30 ] || fail "pane left percentage was not inverted: $out"
@@ -156,8 +158,8 @@ EOF
   pass "an over-threshold worker relaunches once at a parked boundary with a durable progress note"
 }
 
-test_worker_defers_while_working_or_full_gate_locked() {
-  local home wt transcript crew control fakebin global_lock
+test_worker_defers_while_working() {
+  local home wt transcript crew control
   home=$(new_home worker-defer)
   STATE="$home/state"; CONFIG="$home/config"
   wt="$home/wt"
@@ -193,38 +195,7 @@ SH
   grep -Fq 'context-deferred' "$STATE/babysitter-findings.jsonl" \
     || fail "working defer did not record a finding"
 
-  cat > "$crew" <<'SH'
-#!/usr/bin/env bash
-printf 'state: parked · source: run-step · awaiting gate\n'
-SH
-  : > "$wt/.no-mistakes/full-gate.lock"
-  printf 'gen-3\n' >> "$STATE/t2.meta"
-  sed -i.bak 's/spawn_gen=gen-2/spawn_gen=gen-3/' "$STATE/t2.meta"
-  rm -f "$STATE/babysitter-context/t2.deferred"
-  FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$crew" \
-    FM_BABYSITTER_CONTEXT_CONTROL_BIN="$control" fm_bctx_check_worker t2 40
-  [ ! -e "$STATE/babysitter-context/t2.relaunch" ] || fail "full-gate worker was relaunched"
-  grep -Fq 'full-gate lock is present' "$STATE/babysitter-findings.jsonl" \
-    || fail "full-gate defer did not record the reason"
-
-  rm -f "$STATE/babysitter-context/t2.full-gate" "$wt/.no-mistakes/full-gate.lock"
-  global_lock="$home/global-full-gate.lock"
-  : > "$global_lock"
-  fakebin="$home/fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/lockf" <<'SH'
-#!/usr/bin/env bash
-exit 75
-SH
-  chmod +x "$fakebin/lockf"
-  sed -i.bak 's/spawn_gen=gen-3/spawn_gen=gen-4/' "$STATE/t2.meta"
-  PATH="$fakebin:$PATH" FM_BABYSITTER_CONTEXT_FULL_GATE_LOCK="$global_lock" \
-    FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$crew" \
-    FM_BABYSITTER_CONTEXT_CONTROL_BIN="$control" fm_bctx_check_worker t2 40
-  [ ! -e "$STATE/babysitter-context/t2.relaunch" ] || fail "global full-gate worker was relaunched"
-  grep -Fq 'full-gate lock is present' "$STATE/babysitter-findings.jsonl" \
-    || fail "global full-gate defer did not record the reason"
-  pass "worker relaunch defers while working and while a full-gate lock is present"
+  pass "worker relaunch defers while the worker is still working"
 }
 
 test_primary_tmux_restart_at_idle_boundary() {
@@ -257,7 +228,7 @@ EOF
   fm_bctx_check_primary 40
   grep -Fxq /exit "$STATE/exit-command" || fail "tmux restart did not send /exit"
   launch=$(cat "$STATE/launch-command")
-  [ "$launch" = "cd '$home' && exec claude --model sonnet" ] \
+  [ "$launch" = "cd '$home' && claude --model sonnet" ] \
     || fail "tmux restart launch command was wrong: $launch"
   grep -Fxq Enter "$STATE/launch-key" || fail "tmux restart did not submit the launch command"
   grep -Fq 'context-relaunch' "$STATE/babysitter-findings.jsonl" \
@@ -312,7 +283,7 @@ EOF
   PATH="$fakebin:$PATH" FM_BABYSITTER_CONTEXT_OSASCRIPT_BIN="$fakebin/osascript" fm_bctx_check_primary 40
   [ "$(sed -n 1p "$home/osascript.log")" = "- ttys123 /exit" ] \
     || fail "Terminal restart did not send /exit to the recorded tty first: $(cat "$home/osascript.log")"
-  [ "$(sed -n 2p "$home/osascript.log")" = "- ttys123 cd '$home' && exec claude" ] \
+  [ "$(sed -n 2p "$home/osascript.log")" = "- ttys123 cd '$home' && claude" ] \
     || fail "Terminal relaunch was not the recorded command with resume flags dropped: $(cat "$home/osascript.log")"
   [ "$(wc -l < "$home/osascript.log")" -eq 2 ] || fail "Terminal restart sent extra commands: $(cat "$home/osascript.log")"
   grep -Fq 'context-relaunch' "$STATE/babysitter-findings.jsonl" \
@@ -547,7 +518,7 @@ test_primary_restart_command_drops_resume_flags() {
   printf 'placement=tmux\ncwd=%s\nlaunch_command=claude --resume abc-123 --model sonnet -c\n' "$home" \
     > "$home/placement"
   command=$(fm_bctx_primary_restart_command "$home/placement") || fail "restart command was refused"
-  [ "$command" = "cd '$home' && exec claude --model sonnet" ] \
+  [ "$command" = "cd '$home' && claude --model sonnet" ] \
     || fail "resume/continue flags were not dropped from the relaunch: $command"
   printf 'placement=tmux\ncwd=%s\n' "$home" > "$home/placement-bare"
   fm_bctx_primary_restart_command "$home/placement-bare" >/dev/null \
@@ -577,12 +548,70 @@ EOF
   pass "primary over threshold but not at an idle boundary does nothing: no restart, finding, or wake"
 }
 
+test_primary_tmux_slow_replacement_is_verified_without_resending_exit() {
+  local home transcript
+  home=$(new_home primary-tmux-slow)
+  STATE="$home/state"; CONFIG="$home/config"
+  transcript="$home/primary.jsonl"
+  assistant_usage "$transcript" 90000
+  printf 'state=idle\n' > "$STATE/.babysitter-primary-busy"
+  cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
+placement=tmux
+target=%1
+cwd=$home
+launch_command=claude
+EOF
+  fm_backend_foreground_agent_state() {
+    if [ -e "$STATE/launched" ]; then
+      local calls
+      calls=$(( $(cat "$STATE/state-calls" 2>/dev/null || echo 0) + 1 ))
+      printf '%s\n' "$calls" > "$STATE/state-calls"
+      if [ "$calls" -gt 35 ]; then printf alive; else printf dead; fi
+    elif [ -e "$STATE/exited" ]; then printf dead
+    else printf alive; fi
+  }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf 'exit\n' >> "$STATE/exit-sends"; : > "$STATE/exited"; }
+  fm_backend_source() { return 0; }
+  fm_backend_tmux_send_literal() { printf 'launch\n' >> "$STATE/launch-sends"; }
+  fm_backend_tmux_send_key() { : > "$STATE/launched"; }
+  fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
+  fm_bctx_check_primary 40
+  [ "$(wc -l < "$STATE/exit-sends")" -eq 1 ] || fail "first poll did not send exactly one /exit"
+  [ ! -e "$STATE/babysitter-context/primary.relaunch" ] || fail "slow replacement recorded success before it started"
+  grep -Fq 'context-alert' "$STATE/babysitter-findings.jsonl" || fail "slow replacement did not alert on the first poll"
+  fm_bctx_check_primary 40
+  [ "$(wc -l < "$STATE/exit-sends")" -eq 1 ] || fail "retry re-sent /exit to the replacement"
+  [ "$(wc -l < "$STATE/launch-sends")" -eq 1 ] || fail "retry re-typed the launch command"
+  [ -e "$STATE/babysitter-context/primary.relaunch" ] || fail "retry did not record success once the replacement started"
+  grep -Fq 'context-relaunch' "$STATE/babysitter-findings.jsonl" || fail "retry did not record the relaunch finding"
+  pass "a slow-starting tmux replacement is re-verified on later polls without re-sending /exit or the launch command"
+}
+
+test_primary_session_end_clears_placement() {
+  local home
+  home=$(new_home primary-session-end)
+  mkdir -p "$home/bin"
+  touch "$home/AGENTS.md"
+  cp "$ROOT/bin/fm-babysitter-primary-state.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-hook-host-lib.sh" "$home/bin/"
+  git -C "$home" init -q
+  printf 'placement=tmux\ntarget=%%1\n' > "$home/state/.babysitter-primary-placement"
+  printf '{"session_id":"s-end","transcript_path":"%s/t.jsonl"}' "$home" \
+    | FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$home/bin/fm-babysitter-primary-state.sh" idle session-end
+  [ ! -e "$home/state/.babysitter-primary-placement" ] \
+    || fail "session end left the primary placement that names the closed pane"
+  pass "session end clears the primary placement so a later session in that pane is never restarted as the closed one"
+}
+
 test_primary_relaunch_shape_check() {
   local home
   home=$(new_home primary-shape)
   STATE="$home/state"; CONFIG="$home/config"
   printf 'placement=tmux\ncwd=%s\nlaunch_command=claude --allow-dangerously-skip-permissions --effort high\n' "$home" > "$home/real"
-  [ "$(fm_bctx_primary_restart_command "$home/real")" = "cd '$home' && exec claude --allow-dangerously-skip-permissions --effort high" ] \
+  [ "$(fm_bctx_primary_restart_command "$home/real")" = "cd '$home' && claude --allow-dangerously-skip-permissions --effort high" ] \
     || fail "the captain's real primary launch line was refused"
   printf 'placement=tmux\ncwd=%s\nlaunch_command=claude --append-system-prompt Follow AGENTS.md\n' "$home" > "$home/prompt"
   fm_bctx_primary_restart_command "$home/prompt" >/dev/null && fail "a flattened multi-word system prompt was replayed"
@@ -618,7 +647,7 @@ test_transcript_usage_found_past_tail_window
 test_pane_fallback_reads_context_percent
 test_threshold_config_defaults_and_clamps
 test_worker_relaunches_once_at_safe_boundary
-test_worker_defers_while_working_or_full_gate_locked
+test_worker_defers_while_working
 test_primary_tmux_restart_at_idle_boundary
 test_primary_tool_use_in_flight_is_not_idle
 test_primary_restart_command_drops_resume_flags
@@ -631,4 +660,6 @@ test_primary_terminal_never_types_launch_into_live_session
 test_primary_terminal_alerts_when_tab_changed_since_idle
 test_primary_defers_when_not_at_idle_boundary
 test_primary_relaunch_shape_check
+test_primary_tmux_slow_replacement_is_verified_without_resending_exit
+test_primary_session_end_clears_placement
 test_primary_state_hook_records_busy_and_idle

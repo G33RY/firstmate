@@ -41,7 +41,6 @@ PLACEMENT_TMP="$STATE/.babysitter-primary-placement.tmp.$$"
 {
   printf 'session_id=%s\n' "$SESSION_ID"
   printf 'transcript=%s\n' "$TRANSCRIPT"
-  printf 'epoch=%s\n' "$(date +%s 2>/dev/null || echo 0)"
   printf 'cwd=%s\n' "$FM_ROOT"
   printf 'pid=%s\n' "${PPID:-}"
   tty_name=$(ps -o tty= -p "${PPID:-}" 2>/dev/null | awk 'NF {print $1; exit}' || true)
