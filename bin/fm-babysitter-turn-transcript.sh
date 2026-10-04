@@ -12,5 +12,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.transcript_path|type)=="string" then .transcript_path else empty end' 2>/dev/null) || exit 0
 [ -n "$TRANSCRIPT" ] || exit 0
 TMP="$RECORD.tmp.$$"
-printf '%s\n' "$TRANSCRIPT" > "$TMP" 2>/dev/null && mv -f "$TMP" "$RECORD" 2>/dev/null || rm -f "$TMP" 2>/dev/null
+if ! { printf '%s\n' "$TRANSCRIPT" > "$TMP" 2>/dev/null && mv -f "$TMP" "$RECORD" 2>/dev/null; }; then
+  rm -f "$TMP" 2>/dev/null
+fi
 exit 0

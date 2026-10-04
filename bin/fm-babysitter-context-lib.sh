@@ -349,8 +349,11 @@ fm_bctx_mark_launched() {
 
 fm_bctx_begin_attempt() {  # <placement-record> <key> <label>
   local attempt="$STATE/babysitter-context/primary.restart" tmp="$STATE/babysitter-context/primary.restart.tmp.$$"
-  { printf 'key=%s\nlabel=%s\n' "$2" "$3"; cat "$1"; } > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$attempt" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  if { printf 'key=%s\nlabel=%s\n' "$2" "$3"; cat "$1"; } > "$tmp" 2>/dev/null && mv -f "$tmp" "$attempt" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null
+  return 1
 }
 
 fm_bctx_restart_primary_tmux() {  # <placement-record> <key> <label>
