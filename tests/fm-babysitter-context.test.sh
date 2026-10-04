@@ -349,8 +349,8 @@ EOF
   pass "primary with a launch command that flattened quoting alerts for a manual restart without typing anything"
 }
 
-test_worker_relaunch_failure_alerts_once_per_generation() {
-  local home wt transcript control count
+test_worker_relaunch_failure_is_not_retried_until_status_changes() {
+  local home wt transcript control crew count
   home=$(new_home worker-alert-dedupe)
   STATE="$home/state"; CONFIG="$home/config"
   wt="$home/wt"
@@ -372,26 +372,116 @@ printf 'attempt\n' >> "$home/control.log"
 exit 9
 EOF
   chmod +x "$control"
-  cat > "$home/crew-state" <<'SH'
+  crew="$home/crew-state"
+  cat > "$crew" <<'SH'
 #!/usr/bin/env bash
 printf 'state: parked · source: run-step · awaiting gate\n'
 SH
-  chmod +x "$home/crew-state"
+  chmod +x "$crew"
   fm_backend_of_meta() { printf 'fake'; }
   fm_backend_target_of_meta() { printf 'target'; }
   fm_backend_agent_state() { printf 'alive'; }
   fm_wake_append() { printf '%s\n' "$2" >> "$STATE/wakes"; }
-  for _ in 1 2; do
-    FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$home/crew-state" \
+  check_worker() {
+    FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$crew" \
       FM_BABYSITTER_CONTEXT_CONTROL_BIN="$control" fm_bctx_check_worker t3 40
-  done
+  }
+  check_worker; check_worker; check_worker
   count=$(wc -l < "$home/control.log")
-  [ "$count" -eq 2 ] || fail "failed worker relaunch was not retried on each poll: $count attempts"
+  [ "$count" -eq 1 ] || fail "repeated polls after one failed relaunch retried it: $count attempts"
   count=$(grep -c 'context-alert' "$STATE/babysitter-findings.jsonl" || true)
-  [ "$count" -eq 1 ] || fail "failed worker relaunch appended $count alerts for one generation"
+  [ "$count" -eq 1 ] || fail "one failed relaunch appended $count alerts"
   count=$(wc -l < "$STATE/wakes")
-  [ "$count" -eq 1 ] || fail "failed worker relaunch queued $count wakes for one generation"
-  pass "a worker whose relaunch keeps failing retries each poll but alerts and wakes once per spawn generation"
+  [ "$count" -eq 1 ] || fail "one failed relaunch queued $count wakes"
+
+  printf 'working: status changed\n' > "$STATE/t3.status"
+  check_worker
+  count=$(wc -l < "$home/control.log")
+  [ "$count" -eq 2 ] || fail "a status change did not allow a new relaunch attempt: $count attempts"
+
+  assistant_usage "$transcript" 1000
+  check_worker
+  [ ! -e "$STATE/babysitter-context/t3.alert" ] || fail "dropping below the threshold kept the failure record"
+  assistant_usage "$transcript" 90000
+  check_worker
+  count=$(wc -l < "$home/control.log")
+  [ "$count" -eq 3 ] || fail "a new threshold crossing did not retry the relaunch: $count attempts"
+  pass "a failed worker relaunch is not retried until its status changes or its context drops below the threshold"
+}
+
+test_primary_old_session_surviving_exit_is_not_success() {
+  local home transcript
+  home=$(new_home primary-old-survives)
+  STATE="$home/state"; CONFIG="$home/config"
+  transcript="$home/primary.jsonl"
+  assistant_usage "$transcript" 90000
+  printf 'state=idle\n' > "$STATE/.babysitter-primary-busy"
+  cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
+placement=tmux
+target=%1
+cwd=$home
+launch_command=claude
+EOF
+  fm_backend_foreground_agent_state() { printf 'alive'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf 'exit\n' >> "$STATE/exit-sends"; }
+  fm_backend_source() { return 0; }
+  fm_backend_tmux_send_literal() { printf 'launch\n' >> "$STATE/launch-sends"; }
+  fm_backend_tmux_send_key() { return 0; }
+  fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
+  fm_bctx_check_primary 40
+  fm_bctx_check_primary 40
+  [ -e "$STATE/exit-sends" ] || fail "restart did not send /exit"
+  [ ! -e "$STATE/launch-sends" ] || fail "launch command was typed while the old session still ran"
+  [ ! -e "$STATE/babysitter-context/primary.relaunch" ] || fail "a surviving old session was recorded as restarted"
+  grep -Fq 'context-alert' "$STATE/babysitter-findings.jsonl" || fail "surviving old session did not alert"
+  pass "a primary whose old session survives /exit is never recorded as restarted"
+}
+
+test_primary_stale_restart_attempt_is_dropped_for_new_session() {
+  local home old new
+  home=$(new_home primary-stale-attempt)
+  STATE="$home/state"; CONFIG="$home/config"
+  old="$home/old.jsonl"; new="$home/new.jsonl"
+  assistant_usage "$old" 90000
+  assistant_usage "$new" 90000
+  printf 'state=idle\n' > "$STATE/.babysitter-primary-busy"
+  mkdir -p "$STATE/babysitter-context"
+  cat > "$STATE/babysitter-context/primary.restart" <<EOF
+key=$old
+label=primary firstmate context 45% >= 40%
+placement=tmux
+target=%1
+cwd=$home
+launch_command=claude
+EOF
+  cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$new
+placement=tmux
+target=%2
+cwd=$home
+launch_command=claude
+EOF
+  fm_backend_foreground_agent_state() {
+    if [ "$2" = %1 ]; then printf dead
+    elif [ -e "$STATE/launched" ]; then printf alive
+    elif [ -e "$STATE/exited" ]; then printf dead
+    else printf alive; fi
+  }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf '%s\n' "$2" >> "$STATE/exit-targets"; : > "$STATE/exited"; }
+  fm_backend_source() { return 0; }
+  fm_backend_tmux_send_literal() { return 0; }
+  fm_backend_tmux_send_key() { : > "$STATE/launched"; }
+  fm_wake_append() { return 0; }
+  fm_bctx_check_primary 40
+  grep -Fxq '%2' "$STATE/exit-targets" 2>/dev/null \
+    || fail "a stale attempt blocked the restart of the new primary session"
+  grep -Fq "$new" "$STATE/babysitter-context/primary.relaunch" \
+    || fail "the new primary session was not recorded as restarted"
+  [ ! -e "$STATE/babysitter-context/primary.restart" ] || fail "completed attempt was left on disk"
+  pass "a stale restart attempt for a closed primary is dropped so a new primary is restarted normally"
 }
 
 test_worker_turn_transcript_record_keeps_stop_payload_path() {
@@ -653,7 +743,7 @@ test_primary_tool_use_in_flight_is_not_idle
 test_primary_restart_command_drops_resume_flags
 test_primary_tmux_restart_without_new_session_alerts_and_retries
 test_primary_restart_refuses_flattened_arguments
-test_worker_relaunch_failure_alerts_once_per_generation
+test_worker_relaunch_failure_is_not_retried_until_status_changes
 test_worker_turn_transcript_record_keeps_stop_payload_path
 test_primary_terminal_restart_uses_recorded_tty
 test_primary_terminal_never_types_launch_into_live_session
@@ -661,5 +751,7 @@ test_primary_terminal_alerts_when_tab_changed_since_idle
 test_primary_defers_when_not_at_idle_boundary
 test_primary_relaunch_shape_check
 test_primary_tmux_slow_replacement_is_verified_without_resending_exit
+test_primary_old_session_surviving_exit_is_not_success
+test_primary_stale_restart_attempt_is_dropped_for_new_session
 test_primary_session_end_clears_placement
 test_primary_state_hook_records_busy_and_idle

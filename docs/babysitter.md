@@ -70,7 +70,7 @@ A Claude worker's transcript path is recorded by its Stop hook in `state/<id>.tu
 For a live worker at or above the threshold, the guard relaunches only after `bin/fm-crew-state.sh <id>` reports a parked, blocked, or paused boundary, which keeps relaunches away from active drive.
 The relaunch goes through `bin/fm-control.sh <id> relaunch --note ...`, and the note is built only from durable state: latest status event, branch, head, and PR URL if one is present.
 The guard records the task's current spawn generation before acting and will not relaunch that same generation twice.
-If a worker is over threshold but still working, it records one deferred finding for that generation and waits for a later poll.
+If a worker is over threshold but still working, it records one deferred finding for that generation and waits for a later poll. If the control relaunch fails, the guard alerts once for that spawn generation and status line and does not retry until the status changes or the context drops below the threshold.
 
 For the primary firstmate, the tracked Claude hooks record a busy/idle breadcrumb and the capture hook records the transcript path plus the primary placement when it can prove one.
 The guard restarts only when the newest transcript turn is an assistant turn with no unresolved `tool_use`, the lifecycle breadcrumb is idle, and the placement has a supported restart command.

@@ -174,7 +174,7 @@ fm_bctx_marker_seen() {  # <marker> <key>
 
 fm_bctx_check_worker() {  # <id> <threshold>
   local id=$1 threshold=$2 meta="$STATE/$1.meta"
-  local backend target agent_state usage percent used window source key marker current state wt note control_bin
+  local backend target agent_state usage percent used window source key marker current state wt note control_bin failure failure_key
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   [ -f "$meta" ] || return 0
   [ "$(fm_bctx_meta_get "$meta" kind)" != babysitter ] || return 0
@@ -189,7 +189,10 @@ fm_bctx_check_worker() {  # <id> <threshold>
 $usage
 EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$percent" -ge "$threshold" ] || return 0
+  if [ "$percent" -lt "$threshold" ]; then
+    rm -f "$STATE/babysitter-context/$id.alert" 2>/dev/null || true
+    return 0
+  fi
   key=$(fm_bctx_relaunch_marker_key "$meta" "$source")
   marker="$STATE/babysitter-context/$id.relaunch"
   fm_bctx_marker_seen "$marker" "$key" && return 0
@@ -205,18 +208,18 @@ EOF
       return 0
       ;;
   esac
+  failure="$STATE/babysitter-context/$id.alert"
+  failure_key="$key|$(fm_bctx_status_line "$id")"
+  fm_bctx_marker_seen "$failure" "$failure_key" && return 0
   note=$(fm_bctx_progress_note "$id" "$meta" "$percent" "$threshold")
   control_bin=${FM_BABYSITTER_CONTEXT_CONTROL_BIN:-"$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-control.sh"}
   if FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-}}" FM_STATE_OVERRIDE="$STATE" "$control_bin" "$id" relaunch --note "$note" >/dev/null 2>&1; then
     fm_bctx_append_finding context-relaunch "worker $id context ${percent}% >= ${threshold}%; relaunched at idle boundary"
     printf '%s\n' "$key" > "$marker" 2>/dev/null || true
   else
-    marker="$STATE/babysitter-context/$id.alert"
-    if ! fm_bctx_marker_seen "$marker" "$key"; then
-      fm_bctx_append_finding context-alert "worker $id context ${percent}% >= ${threshold}% but relaunch failed"
-      fm_bctx_wake "babysitter-context:$id" "babysitter could not relaunch worker $id after context reached ${percent}%"
-      printf '%s\n' "$key" > "$marker" 2>/dev/null || true
-    fi
+    fm_bctx_append_finding context-alert "worker $id context ${percent}% >= ${threshold}% but relaunch failed"
+    fm_bctx_wake "babysitter-context:$id" "babysitter could not relaunch worker $id after context reached ${percent}%"
+    printf '%s\n' "$failure_key" > "$failure" 2>/dev/null || true
   fi
 }
 
@@ -331,6 +334,10 @@ fm_bctx_tty_session_started() {  # <tty> <old-pid> <executable>
     | awk -v old="$2" -v exe="$3" '$1 != old && index($0, exe) { found = 1 } END { exit !found }'
 }
 
+fm_bctx_mark_launched() {
+  printf 'launched=1\n' >> "$STATE/babysitter-context/primary.restart" 2>/dev/null
+}
+
 fm_bctx_begin_attempt() {  # <placement-record> <key> <label>
   local attempt="$STATE/babysitter-context/primary.restart" tmp="$STATE/babysitter-context/primary.restart.tmp.$$"
   { printf 'key=%s\nlabel=%s\n' "$2" "$3"; cat "$1"; } > "$tmp" 2>/dev/null \
@@ -353,7 +360,8 @@ fm_bctx_restart_primary_tmux() {  # <placement-record> <key> <label>
   fm_bctx_wait_primary_dead tmux "$target" || return 1
   fm_backend_source tmux || return 1
   fm_backend_tmux_send_literal "$target" "$launch" || return 1
-  fm_backend_tmux_send_key "$target" Enter
+  fm_backend_tmux_send_key "$target" Enter || return 1
+  fm_bctx_mark_launched
 }
 
 fm_bctx_terminal_contents() {  # <tty>
@@ -426,7 +434,8 @@ fm_bctx_restart_primary_terminal() {  # <placement-record> <key> <label>
   fm_bctx_begin_attempt "$record" "$key" "$label" || return 1
   fm_bctx_terminal_send "$tty" /exit || return 1
   fm_bctx_poll 30 fm_bctx_pid_gone "$pid" || return 1
-  fm_bctx_terminal_send "$tty" "$launch"
+  fm_bctx_terminal_send "$tty" "$launch" || return 1
+  fm_bctx_mark_launched
 }
 
 fm_bctx_restart_primary() {  # <placement-record> <key> <label>
@@ -441,6 +450,7 @@ fm_bctx_restart_primary() {  # <placement-record> <key> <label>
 
 fm_bctx_primary_replacement_started() {  # <attempt-record>
   local attempt=$1 placement target tty pid exe
+  [ "$(fm_bctx_record_get "$attempt" launched || true)" = 1 ] || return 1
   placement=$(fm_bctx_record_get "$attempt" placement || true)
   case "$placement" in
     tmux)
@@ -475,12 +485,17 @@ fm_bctx_primary_settle_attempt() {  # <attempt-record>
 }
 
 fm_bctx_check_primary() {  # <threshold>
-  local threshold=$1 attempt transcript usage percent key marker summary placement_record
+  local threshold=$1 attempt transcript usage percent key marker summary placement_record pending current
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   attempt="$STATE/babysitter-context/primary.restart"
   if [ -f "$attempt" ] && [ ! -L "$attempt" ]; then
-    fm_bctx_primary_settle_attempt "$attempt"
-    return 0
+    pending=$(fm_bctx_record_get "$attempt" key || true)
+    current=$(fm_bctx_primary_transcript 2>/dev/null || true)
+    if [ -z "$current" ] || [ "$current" = "$pending" ]; then
+      fm_bctx_primary_settle_attempt "$attempt"
+      return 0
+    fi
+    rm -f "$attempt" 2>/dev/null || true
   fi
   transcript=$(fm_bctx_primary_transcript) || return 0
   usage=$(fm_bctx_usage_from_transcript "$transcript" 2>/dev/null) || return 0
