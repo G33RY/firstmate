@@ -232,7 +232,7 @@ It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): prese
 `FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default `3`) bounds consecutive failed judge relaunch attempts before it is reported irrevivable.
 `FM_BABYSITTER_SWEEP_INTERVAL_SECS` (default `1800`) bounds how long a judge pass may go undispatched with no new ledger content before the deterministic cadence check (`bin/fm-babysitter-invoke-lib.sh`) fires one anyway, so a stall with no new dialog still gets a sweep.
 `FM_BABYSITTER_INVOKE_STUCK_SECS` (default `600`) is how long an unacknowledged pass-dispatch record may sit in the judge's steering inbox before the cadence check treats it as orphaned rather than in flight.
-`config/babysitter-context-threshold-percent` (optional, local, gitignored, one integer from 1 through 100) sets the deterministic context-size threshold, default 40 percent.
+`config/babysitter-context-threshold-percent` (optional, local, gitignored, one integer from 1 through 100) sets the deterministic context-size threshold, default 40 percent of a 200,000-token basis used for every model (80,000 tokens).
 The context guard records over-threshold actions in the babysitter findings store and rate-limits worker relaunches to once per task spawn generation.
 Primary firstmate restarts are allowed only from a supported placement breadcrumb recorded by the primary hooks: tmux via `$TMUX_PANE`, or macOS Terminal.app via the tab tty and idle tab-content fingerprint.
 The guard also requires an idle lifecycle breadcrumb and an assistant transcript tail before it sends the harness exit command and relaunches the recorded command from the recorded checkout.

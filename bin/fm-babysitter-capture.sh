@@ -37,10 +37,6 @@ SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r 'if (.session_id|type)=="string" the
 TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.transcript_path|type)=="string" then .transcript_path else empty end' 2>/dev/null) || exit 0
 [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] || { note_error "malformed payload: missing session_id or transcript_path"; exit 0; }
 [ -f "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] && [ ! -L "$TRANSCRIPT" ] || { note_error "transcript unavailable: $TRANSCRIPT"; exit 0; }
-{ printf '%s\t%s\n' "$SESSION_ID" "$TRANSCRIPT" > "$STATE/.babysitter-primary-transcript.tmp.$$" \
-    && mv -f "$STATE/.babysitter-primary-transcript.tmp.$$" "$STATE/.babysitter-primary-transcript"; } 2>/dev/null || true
-rm -f "$STATE/.babysitter-primary-transcript.tmp.$$" 2>/dev/null || true
-
 PLACEMENT_TMP="$STATE/.babysitter-primary-placement.tmp.$$"
 {
   printf 'session_id=%s\n' "$SESSION_ID"

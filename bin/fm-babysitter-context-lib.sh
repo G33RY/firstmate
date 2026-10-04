@@ -5,8 +5,7 @@ set -u
 
 FM_BABYSITTER_CONTEXT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_BABYSITTER_CONTEXT_DEFAULT_THRESHOLD=40
-FM_BABYSITTER_CONTEXT_DEFAULT_WINDOW=200000
-FM_BABYSITTER_CONTEXT_LONG_WINDOW=1000000
+FM_BABYSITTER_CONTEXT_WINDOW=200000
 FM_BABYSITTER_CONTEXT_TAIL_BYTES=4194304
 
 fm_bctx_meta_get() {  # <meta> <key>
@@ -30,42 +29,44 @@ fm_bctx_threshold_percent() {
   printf '%s\n' "$value"
 }
 
-fm_bctx_model_window() {  # <model>
-  case "$1" in
-    *'[1m]'*) printf '%s\n' "$FM_BABYSITTER_CONTEXT_LONG_WINDOW" ;;
-    *) printf '%s\n' "$FM_BABYSITTER_CONTEXT_DEFAULT_WINDOW" ;;
-  esac
+fm_bctx_last_row() {  # <reader> <transcript>
+  local reader=$1 transcript=$2 row
+  row=$(tail -c "$FM_BABYSITTER_CONTEXT_TAIL_BYTES" "$transcript" 2>/dev/null | "$reader")
+  [ -n "$row" ] || row=$("$reader" < "$transcript")
+  printf '%s\n' "$row"
 }
 
-fm_bctx_usage_row() {  # reads transcript JSONL on stdin; prints the last assistant <model><TAB><used-tokens>
+fm_bctx_usage_row() {  # reads transcript JSONL on stdin; prints the last assistant usage token count
   jq -Rr '
-    def n($v): if ($v|type)=="number" then $v else 0 end;
-    def usage: (.message.usage? // .usage? // empty);
+    def n: if type == "number" then . else 0 end;
     fromjson?
-    | select(((.message.role? // .type? // "") == "assistant") and (usage != null))
-    | usage as $u
-    | (n($u.input_tokens) + n($u.input) + n($u.cache_creation_input_tokens)
-       + n($u.cache_read_input_tokens) + n($u.cacheWrite) + n($u.cacheRead)) as $used
+    | select(type == "object" and .type == "assistant")
+    | .message.usage? // empty
+    | ((.input_tokens? // null | n) + (.cache_creation_input_tokens? // null | n) + (.cache_read_input_tokens? // null | n)) as $used
     | select($used > 0)
-    | [(.message.model // .model // ""), ($used|tostring)]
+    | $used
+  ' 2>/dev/null | tail -1
+}
+
+fm_bctx_turn_row() {  # reads transcript JSONL on stdin; prints <role><TAB><has-open-tool-use> of the last main-chain turn
+  jq -Rr '
+    fromjson?
+    | select(type == "object" and (.isSidechain // false) != true)
+    | (.message.role? // .type? // empty) as $role
+    | select($role == "assistant" or $role == "user")
+    | [$role, ([(.message.content? // [])[]? | select(type == "object" and .type == "tool_use")] | length > 0 | tostring)]
     | @tsv
   ' 2>/dev/null | tail -1
 }
 
 fm_bctx_usage_from_transcript() {  # <transcript>
-  local transcript=$1 row model used window percent
+  local transcript=$1 used percent
   [ -f "$transcript" ] && [ -r "$transcript" ] && [ ! -L "$transcript" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  row=$(tail -c "$FM_BABYSITTER_CONTEXT_TAIL_BYTES" "$transcript" 2>/dev/null | fm_bctx_usage_row)
-  [ -n "$row" ] || row=$(fm_bctx_usage_row < "$transcript")
-  [ -n "$row" ] || return 1
-  IFS=$'\t' read -r model used <<EOF
-$row
-EOF
+  used=$(fm_bctx_last_row fm_bctx_usage_row "$transcript")
   case "$used" in ''|*[!0-9]*) return 1 ;; esac
-  window=$(fm_bctx_model_window "$model")
-  percent=$(( (used * 100 + window - 1) / window ))
-  printf '%s\t%s\t%s\t%s\ttranscript:%s\n' "$percent" "$used" "$window" "$model" "$transcript"
+  percent=$(( (used * 100 + FM_BABYSITTER_CONTEXT_WINDOW - 1) / FM_BABYSITTER_CONTEXT_WINDOW ))
+  printf '%s\t%s\t%s\ttranscript:%s\n' "$percent" "$used" "$FM_BABYSITTER_CONTEXT_WINDOW" "$transcript"
 }
 
 fm_bctx_usage_from_pane() {  # <backend> <target> <label>
@@ -81,21 +82,20 @@ fm_bctx_usage_from_pane() {  # <backend> <target> <label>
     *left) percent=$(( 100 - number )) ;;
     *) return 1 ;;
   esac
-  printf '%s\t0\t100\tunknown\tpane\n' "$percent"
+  printf '%s\t0\t%s\tpane\n' "$percent" "$FM_BABYSITTER_CONTEXT_WINDOW"
 }
 
-fm_bctx_task_transcript() {  # <meta>
-  local meta=$1 path
-  path=$(fm_bctx_meta_get "$meta" transcript)
-  [ -n "$path" ] || path=$(fm_bctx_meta_get "$meta" claude_transcript)
-  [ -n "$path" ] || return 1
+fm_bctx_task_transcript() {  # <id>
+  local record="$STATE/$1.turn-transcript" path
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  path=$(sed -n '1p' "$record" 2>/dev/null) || return 1
   [ -f "$path" ] && [ -r "$path" ] && [ ! -L "$path" ] || return 1
   printf '%s\n' "$path"
 }
 
 fm_bctx_task_usage() {  # <id> <meta>
   local id=$1 meta=$2 backend target transcript
-  if transcript=$(fm_bctx_task_transcript "$meta"); then
+  if transcript=$(fm_bctx_task_transcript "$id"); then
     fm_bctx_usage_from_transcript "$transcript" && return 0
   fi
   command -v fm_backend_of_meta >/dev/null 2>&1 || return 1
@@ -186,7 +186,7 @@ fm_bctx_marker_seen() {  # <marker> <key>
 
 fm_bctx_check_worker() {  # <id> <threshold>
   local id=$1 threshold=$2 meta="$STATE/$1.meta"
-  local backend target agent_state usage percent used window model source key marker current state wt note control_bin
+  local backend target agent_state usage percent used window source key marker current state wt note control_bin
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   [ -f "$meta" ] || return 0
   [ "$(fm_bctx_meta_get "$meta" kind)" != babysitter ] || return 0
@@ -197,7 +197,7 @@ fm_bctx_check_worker() {  # <id> <threshold>
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   [ "$agent_state" = alive ] || return 0
   usage=$(fm_bctx_task_usage "$id" "$meta" 2>/dev/null) || return 0
-  IFS=$'\t' read -r percent used window model source <<EOF
+  IFS=$'\t' read -r percent used window source <<EOF
 $usage
 EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
@@ -226,51 +226,43 @@ EOF
     return 0
   fi
   note=$(fm_bctx_progress_note "$id" "$meta" "$percent" "$threshold")
-  fm_bctx_append_finding context-relaunch "worker $id context ${percent}% >= ${threshold}%; relaunching at idle boundary"
   control_bin=${FM_BABYSITTER_CONTEXT_CONTROL_BIN:-"$FM_BABYSITTER_CONTEXT_LIB_DIR/fm-control.sh"}
   if FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-}}" FM_STATE_OVERRIDE="$STATE" "$control_bin" "$id" relaunch --note "$note" >/dev/null 2>&1; then
+    fm_bctx_append_finding context-relaunch "worker $id context ${percent}% >= ${threshold}%; relaunched at idle boundary"
     printf '%s\n' "$key" > "$marker" 2>/dev/null || true
   else
-    fm_bctx_append_finding context-alert "worker $id context ${percent}% >= ${threshold}% but relaunch failed"
-    fm_bctx_wake "babysitter-context:$id" "babysitter could not relaunch worker $id after context reached ${percent}%"
+    marker="$STATE/babysitter-context/$id.alert"
+    if ! fm_bctx_marker_seen "$marker" "$key"; then
+      fm_bctx_append_finding context-alert "worker $id context ${percent}% >= ${threshold}% but relaunch failed"
+      fm_bctx_wake "babysitter-context:$id" "babysitter could not relaunch worker $id after context reached ${percent}%"
+      printf '%s\n' "$key" > "$marker" 2>/dev/null || true
+    fi
   fi
-}
-
-fm_bctx_primary_transcript() {
-  local record="$STATE/.babysitter-primary-transcript" path
-  [ -f "$record" ] && [ ! -L "$record" ] || return 1
-  path=$(awk -F '\t' 'NF >= 2 {print $2}' "$record" 2>/dev/null | tail -1)
-  [ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ] && [ ! -L "$path" ] || return 1
-  printf '%s\n' "$path"
-}
-
-fm_bctx_latest_transcript_turn() {  # <transcript>; prints <role><TAB><has-open-tool-use>
-  local transcript=$1
-  command -v jq >/dev/null 2>&1 || return 1
-  jq -r '
-    select((.isSidechain // false) != true)
-    | (.message.role? // .type? // empty) as $role
-    | select($role == "assistant" or $role == "user")
-    | [$role, ([(.message.content? // [])[]? | select(type == "object" and .type == "tool_use")] | length > 0 | tostring)]
-    | @tsv
-  ' "$transcript" 2>/dev/null | tail -1
-}
-
-fm_bctx_primary_idle_boundary() {  # <transcript>
-  local transcript=$1 turn role open_tool busy_state
-  turn=$(fm_bctx_latest_transcript_turn "$transcript") || return 1
-  IFS=$'\t' read -r role open_tool <<EOF
-$turn
-EOF
-  [ "$role" = assistant ] && [ "$open_tool" = false ] || return 1
-  busy_state=$(fm_bctx_record_get "$STATE/.babysitter-primary-busy" state || true)
-  [ "$busy_state" = idle ]
 }
 
 fm_bctx_primary_placement_record() {
   local record="$STATE/.babysitter-primary-placement"
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   printf '%s\n' "$record"
+}
+
+fm_bctx_primary_transcript() {
+  local record path
+  record=$(fm_bctx_primary_placement_record) || return 1
+  path=$(fm_bctx_record_get "$record" transcript || true)
+  [ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ] && [ ! -L "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+
+fm_bctx_primary_idle_boundary() {  # <transcript>
+  local transcript=$1 turn role open_tool busy_state
+  turn=$(fm_bctx_last_row fm_bctx_turn_row "$transcript") || return 1
+  IFS=$'\t' read -r role open_tool <<EOF
+$turn
+EOF
+  [ "$role" = assistant ] && [ "$open_tool" = false ] || return 1
+  busy_state=$(fm_bctx_record_get "$STATE/.babysitter-primary-busy" state || true)
+  [ "$busy_state" = idle ]
 }
 
 fm_bctx_fresh_launch_command() {  # <launch-command>
@@ -297,9 +289,27 @@ fm_bctx_primary_restart_command() {  # <placement-record>
   local record=$1 command cwd
   command=$(fm_bctx_record_get "$record" launch_command || true)
   command=$(fm_bctx_fresh_launch_command "$command") || return 1
+  case "$command" in *[!A-Za-z0-9_./:=@%+,\ -]*) return 1 ;; esac
   cwd=$(fm_bctx_record_get "$record" cwd || true)
   [ -n "$cwd" ] || cwd="$FM_BABYSITTER_CONTEXT_LIB_DIR/.."
   printf 'cd %s && exec %s\n' "$(fm_bctx_shell_quote "$cwd")" "$command"
+}
+
+fm_bctx_primary_executable() {  # <placement-record>
+  local record=$1 command
+  command=$(fm_bctx_fresh_launch_command "$(fm_bctx_record_get "$record" launch_command || true)") || return 1
+  command=${command%% *}
+  printf '%s\n' "${command##*/}"
+}
+
+fm_bctx_poll() {  # <attempts> <command> [args...]
+  local attempts=$1 i=0
+  shift
+  while ! "$@"; do
+    [ "$i" -lt "$attempts" ] || return 1
+    sleep 0.2
+    i=$((i + 1))
+  done
 }
 
 fm_bctx_wait_primary_dead() {  # <backend> <target>
@@ -314,13 +324,17 @@ fm_bctx_wait_primary_dead() {  # <backend> <target>
   return 1
 }
 
-fm_bctx_wait_pid_exit() {  # <pid>
-  local pid=$1 i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    [ "$i" -lt 30 ] || return 1
-    sleep 0.2
-    i=$((i + 1))
-  done
+fm_bctx_pid_gone() {  # <pid>
+  ! kill -0 "$1" 2>/dev/null
+}
+
+fm_bctx_tmux_alive() {  # <target>
+  [ "$(fm_backend_foreground_agent_state tmux "$1" 2>/dev/null || true)" = alive ]
+}
+
+fm_bctx_tty_session_started() {  # <tty> <old-pid> <executable>
+  ps -t "$1" -o pid= -o command= 2>/dev/null \
+    | awk -v old="$2" -v exe="$3" '$1 != old && index($0, exe) { found = 1 } END { exit !found }'
 }
 
 fm_bctx_restart_primary_tmux() {  # <placement-record>
@@ -339,6 +353,7 @@ fm_bctx_restart_primary_tmux() {  # <placement-record>
   fm_backend_source tmux || return 1
   fm_backend_tmux_send_literal "$target" "$launch" || return 1
   fm_backend_tmux_send_key "$target" Enter || return 1
+  fm_bctx_poll 30 fm_bctx_tmux_alive "$target"
 }
 
 fm_bctx_terminal_contents() {  # <tty>
@@ -400,16 +415,18 @@ OSA
 }
 
 fm_bctx_restart_primary_terminal() {  # <placement-record>
-  local record=$1 tty pid launch
+  local record=$1 tty pid launch exe
   tty=$(fm_bctx_record_get "$record" tty || true)
   [ -n "$tty" ] || return 1
   pid=$(fm_bctx_record_get "$record" pid || true)
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   launch=$(fm_bctx_primary_restart_command "$record") || return 1
+  exe=$(fm_bctx_primary_executable "$record") || return 1
   fm_bctx_terminal_contents_unchanged "$record" "$tty" || return 1
   fm_bctx_terminal_send "$tty" /exit || return 1
-  fm_bctx_wait_pid_exit "$pid" || return 1
-  fm_bctx_terminal_send "$tty" "$launch"
+  fm_bctx_poll 30 fm_bctx_pid_gone "$pid" || return 1
+  fm_bctx_terminal_send "$tty" "$launch" || return 1
+  fm_bctx_poll 30 fm_bctx_tty_session_started "$tty" "$pid" "$exe"
 }
 
 fm_bctx_restart_primary() {  # <placement-record>
@@ -423,11 +440,11 @@ fm_bctx_restart_primary() {  # <placement-record>
 }
 
 fm_bctx_check_primary() {  # <threshold>
-  local threshold=$1 transcript usage percent used window model source key marker summary placement_record
+  local threshold=$1 transcript usage percent used window source key marker summary placement_record
   mkdir -p "$STATE/babysitter-context" 2>/dev/null || return 0
   transcript=$(fm_bctx_primary_transcript) || return 0
   usage=$(fm_bctx_usage_from_transcript "$transcript" 2>/dev/null) || return 0
-  IFS=$'\t' read -r percent used window model source <<EOF
+  IFS=$'\t' read -r percent used window source <<EOF
 $usage
 EOF
   case "$percent" in ''|*[!0-9]*) return 0 ;; esac
@@ -443,7 +460,7 @@ EOF
   else
     marker="$STATE/babysitter-context/primary.alert"
     fm_bctx_marker_seen "$marker" "$key" && return 0
-    summary="primary firstmate context ${percent}% >= ${threshold}%; no supported safe primary restart boundary was proven"
+    summary="primary firstmate context ${percent}% >= ${threshold}%; automatic restart not proven safe, restart manually"
     fm_bctx_append_finding context-alert "$summary"
     fm_bctx_wake "babysitter-context:primary" "$summary"
   fi

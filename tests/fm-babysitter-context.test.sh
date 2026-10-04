@@ -18,10 +18,10 @@ new_home() {  # <name>
   printf '%s\n' "$dir"
 }
 
-assistant_usage() {  # <path> <used> [model]
+assistant_usage() {  # <path> <used>
   cat > "$1" <<EOF
 {"type":"user","message":{"role":"user","content":"please work"}}
-{"type":"assistant","message":{"role":"assistant","model":"${3:-claude-test}","usage":{"input_tokens":$2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":"done"}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-test","usage":{"input_tokens":$2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":"done"}}
 EOF
 }
 
@@ -57,24 +57,6 @@ EOF
   [ "$used" = 100000 ] || fail "cache tokens were not counted into used tokens: $out"
   [ "$window" = 200000 ] || fail "default window was not chosen for a non-1M model: $out"
   pass "transcript usage counts input plus cache tokens against the context window"
-}
-
-test_context_window_follows_model_id() {
-  local file out percent window
-  file="$TMP_ROOT/window.jsonl"
-  assistant_usage "$file" 100000 'claude-x[1m]'
-  out=$(fm_bctx_usage_from_transcript "$file") || fail "1M usage parse failed"
-  IFS=$'\t' read -r percent _used window _model _source <<EOF
-$out
-EOF
-  [ "$window" = 1000000 ] && [ "$percent" = 10 ] || fail "[1m] model did not use a 1M window: $out"
-  assistant_usage "$file" 100000 claude-x
-  out=$(fm_bctx_usage_from_transcript "$file") || fail "200k usage parse failed"
-  IFS=$'\t' read -r percent _used window _model _source <<EOF
-$out
-EOF
-  [ "$window" = 200000 ] && [ "$percent" = 50 ] || fail "non-1M model did not use a 200k window: $out"
-  pass "context window is chosen from the model id: [1m] uses 1M, other models 200k"
 }
 
 test_transcript_usage_found_past_tail_window() {
@@ -137,13 +119,13 @@ test_worker_relaunches_once_at_safe_boundary() {
   git -C "$wt" commit -q -m init
   transcript="$home/t.jsonl"
   assistant_usage "$transcript" 90000
+  printf '%s\n' "$transcript" > "$STATE/t1.turn-transcript"
   cat > "$STATE/t1.meta" <<EOF
 kind=ship
 backend=fake
 window=target
 worktree=$wt
 spawn_gen=gen-1
-transcript=$transcript
 EOF
   printf 'working: implementation underway\n' > "$STATE/t1.status"
   crew="$home/crew-state"
@@ -182,13 +164,13 @@ test_worker_defers_while_working_or_full_gate_locked() {
   mkdir -p "$wt/.no-mistakes"
   transcript="$home/t.jsonl"
   assistant_usage "$transcript" 90000
+  printf '%s\n' "$transcript" > "$STATE/t2.turn-transcript"
   cat > "$STATE/t2.meta" <<EOF
 kind=ship
 backend=fake
 window=target
 worktree=$wt
 spawn_gen=gen-2
-transcript=$transcript
 EOF
   crew="$home/crew-state"
   control="$home/control"
@@ -251,16 +233,18 @@ test_primary_tmux_restart_at_idle_boundary() {
   STATE="$home/state"; CONFIG="$home/config"
   transcript="$home/primary.jsonl"
   assistant_usage "$transcript" 90000
-  printf 's1\t%s\n' "$transcript" > "$STATE/.babysitter-primary-transcript"
   printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
   cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
 placement=tmux
 target=%1
 cwd=$home
 launch_command=claude --model sonnet
 EOF
   fm_backend_foreground_agent_state() {
-    [ -e "$STATE/exited" ] && printf 'dead' || printf 'alive'
+    if [ -e "$STATE/launched" ]; then printf 'alive'
+    elif [ -e "$STATE/exited" ]; then printf 'dead'
+    else printf 'alive'; fi
   }
   fm_backend_composer_state() { printf 'empty'; }
   fm_backend_send_text_submit() {
@@ -269,7 +253,7 @@ EOF
   }
   fm_backend_source() { return 0; }
   fm_backend_tmux_send_literal() { printf '%s\n' "$2" > "$STATE/launch-command"; }
-  fm_backend_tmux_send_key() { printf '%s\n' "$2" > "$STATE/launch-key"; }
+  fm_backend_tmux_send_key() { printf '%s\n' "$2" > "$STATE/launch-key"; : > "$STATE/launched"; }
   fm_bctx_check_primary 40
   grep -Fxq /exit "$STATE/exit-command" || fail "tmux restart did not send /exit"
   launch=$(cat "$STATE/launch-command")
@@ -296,7 +280,12 @@ case "\$script" in
   *) printf '%s\n' "\$*" >> "$home/osascript.log" ;;
 esac
 EOF
-  chmod +x "$fakebin/uname" "$fakebin/osascript"
+  cat > "$fakebin/ps" <<EOF
+#!/usr/bin/env bash
+[ "\$(cat "$home/osascript.log" 2>/dev/null | wc -l)" -ge 2 ] || exit 0
+printf '%s\n' '4242 claude --model sonnet'
+EOF
+  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/ps"
   printf '%s\n' "$fakebin"
 }
 
@@ -309,9 +298,9 @@ test_primary_terminal_restart_uses_recorded_tty() {
   terminal_hash=$(printf 'same contents' | cksum | awk '{print $1 ":" $2}')
   sleep 0 & dead_pid=$!
   wait "$dead_pid" 2>/dev/null || true
-  printf 's1\t%s\n' "$transcript" > "$STATE/.babysitter-primary-transcript"
   printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
   cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
 placement=terminal
 tty=ttys123
 pid=$dead_pid
@@ -331,6 +320,123 @@ EOF
   pass "primary Terminal.app placement sends exit, waits for the recorded pid, then relaunches without resume flags"
 }
 
+test_primary_tmux_restart_without_new_session_alerts_and_retries() {
+  local home transcript
+  home=$(new_home primary-tmux-no-session)
+  STATE="$home/state"; CONFIG="$home/config"
+  transcript="$home/primary.jsonl"
+  assistant_usage "$transcript" 90000
+  printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
+  cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
+placement=tmux
+target=%1
+cwd=$home
+launch_command=claude
+EOF
+  fm_backend_foreground_agent_state() {
+    if [ -e "$STATE/exited" ]; then printf 'dead'; else printf 'alive'; fi
+  }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { : > "$STATE/exited"; }
+  fm_backend_source() { return 0; }
+  fm_backend_tmux_send_literal() { : > "$STATE/launch-sent"; }
+  fm_backend_tmux_send_key() { return 0; }
+  fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
+  fm_bctx_check_primary 40
+  [ -e "$STATE/launch-sent" ] || fail "launch command was not typed after /exit"
+  [ ! -e "$STATE/babysitter-context/primary.relaunch" ] || fail "unverified relaunch was recorded as success"
+  grep -Fq 'context-relaunch' "$STATE/babysitter-findings.jsonl" 2>/dev/null \
+    && fail "unverified relaunch recorded a relaunch finding"
+  grep -Fq 'context-alert' "$STATE/babysitter-findings.jsonl" \
+    || fail "unverified relaunch did not alert"
+  pass "primary tmux relaunch without a new live session alerts and does not record success"
+}
+
+test_primary_restart_refuses_flattened_arguments() {
+  local home transcript
+  home=$(new_home primary-flattened)
+  STATE="$home/state"; CONFIG="$home/config"
+  transcript="$home/primary.jsonl"
+  assistant_usage "$transcript" 90000
+  printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
+  cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
+placement=tmux
+target=%1
+cwd=$home
+launch_command=claude --append-system-prompt Follow AGENTS.md (see docs)
+EOF
+  fm_backend_foreground_agent_state() { printf 'alive'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf '%s\n' "$3" > "$STATE/exit-command"; }
+  fm_wake_append() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$STATE/wakes"; }
+  fm_bctx_check_primary 40
+  [ ! -e "$STATE/exit-command" ] || fail "primary got /exit for an unreplayable launch command"
+  grep -Fq 'restart manually' "$STATE/babysitter-findings.jsonl" \
+    || fail "unreplayable launch command did not alert for a manual restart"
+  pass "primary with a launch command that flattened quoting alerts for a manual restart without typing anything"
+}
+
+test_worker_relaunch_failure_alerts_once_per_generation() {
+  local home wt transcript control count
+  home=$(new_home worker-alert-dedupe)
+  STATE="$home/state"; CONFIG="$home/config"
+  wt="$home/wt"
+  mkdir -p "$wt"
+  transcript="$home/t.jsonl"
+  assistant_usage "$transcript" 90000
+  printf '%s\n' "$transcript" > "$STATE/t3.turn-transcript"
+  cat > "$STATE/t3.meta" <<EOF
+kind=ship
+backend=fake
+window=target
+worktree=$wt
+spawn_gen=gen-9
+EOF
+  control="$home/control"
+  cat > "$control" <<EOF
+#!/usr/bin/env bash
+printf 'attempt\n' >> "$home/control.log"
+exit 9
+EOF
+  chmod +x "$control"
+  cat > "$home/crew-state" <<'SH'
+#!/usr/bin/env bash
+printf 'state: parked · source: run-step · awaiting gate\n'
+SH
+  chmod +x "$home/crew-state"
+  fm_backend_of_meta() { printf 'fake'; }
+  fm_backend_target_of_meta() { printf 'target'; }
+  fm_backend_agent_state() { printf 'alive'; }
+  fm_wake_append() { printf '%s\n' "$2" >> "$STATE/wakes"; }
+  for _ in 1 2; do
+    FM_BABYSITTER_CONTEXT_CREW_STATE_BIN="$home/crew-state" \
+      FM_BABYSITTER_CONTEXT_CONTROL_BIN="$control" fm_bctx_check_worker t3 40
+  done
+  count=$(wc -l < "$home/control.log")
+  [ "$count" -eq 2 ] || fail "failed worker relaunch was not retried on each poll: $count attempts"
+  count=$(grep -c 'context-alert' "$STATE/babysitter-findings.jsonl" || true)
+  [ "$count" -eq 1 ] || fail "failed worker relaunch appended $count alerts for one generation"
+  count=$(wc -l < "$STATE/wakes")
+  [ "$count" -eq 1 ] || fail "failed worker relaunch queued $count wakes for one generation"
+  pass "a worker whose relaunch keeps failing retries each poll but alerts and wakes once per spawn generation"
+}
+
+test_worker_turn_transcript_record_keeps_stop_payload_path() {
+  local home record payload
+  home=$(new_home turn-transcript)
+  record="$home/state/t4.turn-transcript"
+  payload='{"session_id":"s-w","transcript_path":"/tmp/worker-transcript.jsonl"}'
+  printf '%s' "$payload" | "$ROOT/bin/fm-babysitter-turn-transcript.sh" "$record"
+  [ "$(cat "$record")" = /tmp/worker-transcript.jsonl ] \
+    || fail "stop payload transcript path was not recorded: $(cat "$record" 2>/dev/null)"
+  printf 'not json' | "$ROOT/bin/fm-babysitter-turn-transcript.sh" "$record"
+  [ "$(cat "$record")" = /tmp/worker-transcript.jsonl ] \
+    || fail "a malformed stop payload overwrote the recorded transcript"
+  pass "the worker Stop hook records its payload transcript path and ignores malformed payloads"
+}
+
 test_primary_terminal_never_types_launch_into_live_session() {
   local home transcript fakebin terminal_hash live_pid
   home=$(new_home primary-terminal-live)
@@ -339,9 +445,9 @@ test_primary_terminal_never_types_launch_into_live_session() {
   assistant_usage "$transcript" 90000
   terminal_hash=$(printf 'same contents' | cksum | awk '{print $1 ":" $2}')
   sleep 60 & live_pid=$!
-  printf 's1\t%s\n' "$transcript" > "$STATE/.babysitter-primary-transcript"
   printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
   cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
 placement=terminal
 tty=ttys123
 pid=$live_pid
@@ -371,9 +477,9 @@ test_primary_terminal_alerts_when_tab_changed_since_idle() {
   transcript="$home/primary.jsonl"
   assistant_usage "$transcript" 90000
   terminal_hash=$(printf 'same contents' | cksum | awk '{print $1 ":" $2}')
-  printf 's1\t%s\n' "$transcript" > "$STATE/.babysitter-primary-transcript"
   printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
   cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
 placement=terminal
 tty=ttys123
 cwd=$home
@@ -411,9 +517,9 @@ test_primary_tool_use_in_flight_is_not_idle() {
   STATE="$home/state"; CONFIG="$home/config"
   transcript="$home/primary.jsonl"
   assistant_tool_use_pending "$transcript"
-  printf 's1\t%s\n' "$transcript" > "$STATE/.babysitter-primary-transcript"
   printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
   cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
 placement=tmux
 target=%1
 cwd=$home
@@ -455,9 +561,9 @@ test_primary_alerts_when_unread_or_busy() {
   STATE="$home/state"; CONFIG="$home/config"
   transcript="$home/primary.jsonl"
   latest_user_usage "$transcript"
-  printf 's1\t%s\n' "$transcript" > "$STATE/.babysitter-primary-transcript"
   printf 'state=idle\nevent=stop\n' > "$STATE/.babysitter-primary-busy"
   cat > "$STATE/.babysitter-primary-placement" <<EOF
+transcript=$transcript
 placement=tmux
 target=%1
 cwd=$home
@@ -486,8 +592,6 @@ test_primary_state_hook_records_busy_and_idle() {
     "$home/bin/fm-babysitter-primary-state.sh" busy user-prompt-submit
   grep -Fxq 'state=busy' "$home/state/.babysitter-primary-busy" \
     || fail "primary hook did not record busy: $(cat "$home/state/.babysitter-primary-busy")"
-  grep -Fxq 'session_id=s-hook' "$home/state/.babysitter-primary-busy" \
-    || fail "primary hook did not preserve session id"
   printf '%s' "$payload" | FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
     "$home/bin/fm-babysitter-primary-state.sh" idle stop
   grep -Fxq 'state=idle' "$home/state/.babysitter-primary-busy" \
@@ -496,7 +600,6 @@ test_primary_state_hook_records_busy_and_idle() {
 }
 
 test_transcript_usage_counts_cache_tokens
-test_context_window_follows_model_id
 test_transcript_usage_found_past_tail_window
 test_pane_fallback_reads_context_percent
 test_threshold_config_defaults_and_clamps
@@ -505,6 +608,10 @@ test_worker_defers_while_working_or_full_gate_locked
 test_primary_tmux_restart_at_idle_boundary
 test_primary_tool_use_in_flight_is_not_idle
 test_primary_restart_command_drops_resume_flags
+test_primary_tmux_restart_without_new_session_alerts_and_retries
+test_primary_restart_refuses_flattened_arguments
+test_worker_relaunch_failure_alerts_once_per_generation
+test_worker_turn_transcript_record_keeps_stop_payload_path
 test_primary_terminal_restart_uses_recorded_tty
 test_primary_terminal_never_types_launch_into_live_session
 test_primary_terminal_alerts_when_tab_changed_since_idle

@@ -62,10 +62,10 @@ Never read your own findings store from the start either; if you need to check w
 ## Context-Size Guard (deterministic, no judge)
 
 `bin/fm-babysitter-context-lib.sh` runs from the same `state/babysitter.check.sh` watcher poll as judge liveness and cadence.
-It measures the primary firstmate transcript recorded by the capture hook and every live task record under `state/*.meta`.
-For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against the context window, which is chosen from the model id: a `[1m]` model uses 1,000,000 tokens and every other model 200,000.
-When no transcript is reachable it falls back to a rendered context percentage from the pane.
-The default threshold is 40 percent and `config/babysitter-context-threshold-percent` sets a home-local integer override.
+It measures the primary firstmate transcript recorded by the capture hook and every live task.
+For Claude Code transcripts it reads the newest assistant message usage from JSONL and counts input, cache creation, and cache read tokens against a 200,000-token basis for every model, so the default 40 percent threshold is 80,000 tokens everywhere; `[1m]` models are not given a larger window.
+A Claude worker's transcript path is recorded by its Stop hook in `state/<id>.turn-transcript` and removed by teardown; when no transcript is recorded (before its first turn, or for a harness without one) the guard falls back to a rendered context percentage from the pane.
+`config/babysitter-context-threshold-percent` sets a home-local integer override of the 40 percent default.
 
 For a live worker at or above the threshold, the guard relaunches only after `bin/fm-crew-state.sh <id>` reports an idle boundary state and no full-gate lock is visible in that worktree's `.no-mistakes` state.
 The relaunch goes through `bin/fm-control.sh <id> relaunch --note ...`, and the note is built only from durable state: latest status event, branch, head, and PR URL if one is present.
@@ -77,6 +77,9 @@ The guard restarts only when the newest transcript turn is an assistant turn wit
 Supported placements are a tmux pane recorded from `$TMUX_PANE` and a macOS Terminal.app tab recorded by its tty plus a tab-content fingerprint from the idle hook.
 Both paths send the harness exit command first, then relaunch the recorded command from the recorded checkout with resume and continue flags dropped, so session start rebuilds from durable state in a fresh context.
 The Terminal.app path also requires the tab contents to match the idle fingerprint immediately before restart, and types the relaunch command only after the recorded primary process has exited; if it has not exited within the bounded wait, nothing further is typed and the guard alerts.
+Success is recorded only after a bounded check that the replacement session started: a new live foreground agent in the tmux pane, or a new process running the same executable on the Terminal.app tty.
+If that check times out, the guard alerts once per transcript state and retries on the next poll without recording success.
+The recorded launch command comes from `ps` output, which has lost its original quoting; the guard replays it only when every word is plain (letters, digits, and `_./:=@%+,-`). Any other character, such as parentheses or a space inside an argument, makes the guard type nothing and alert for a manual restart with the context percentage.
 If the placement, lifecycle state, transcript tail, composer state, or relaunch command is not proven safe, the guard records a durable finding and queues a `check:` wake instead of acting.
 
 ## Liveness and persistence guarantees

@@ -22,20 +22,11 @@ if [ -n "$PAYLOAD" ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
 fi
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-SESSION_ID=
-TRANSCRIPT=
-if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
-  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r 'if (.session_id|type)=="string" then .session_id else empty end' 2>/dev/null) || SESSION_ID=
-  TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.transcript_path|type)=="string" then .transcript_path else empty end' 2>/dev/null) || TRANSCRIPT=
-fi
-
 TMP="$STATE/.babysitter-primary-busy.tmp.$$"
 {
   printf 'state=%s\n' "$STATE_WORD"
   printf 'event=%s\n' "$EVENT"
   printf 'epoch=%s\n' "$(date +%s 2>/dev/null || echo 0)"
-  [ -z "$SESSION_ID" ] || printf 'session_id=%s\n' "$SESSION_ID"
-  [ -z "$TRANSCRIPT" ] || printf 'transcript=%s\n' "$TRANSCRIPT"
 } > "$TMP" 2>/dev/null && mv -f "$TMP" "$STATE/.babysitter-primary-busy" 2>/dev/null || true
 rm -f "$TMP" 2>/dev/null || true
 exit 0
