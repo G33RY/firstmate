@@ -2516,7 +2516,12 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      if [ -e "$STATE/.runstep-$key" ]; then
+        clear_pause_state "$key"
+        handoff_run_step_to_wedge "$key"
+      else
+        clear_pause_tracking "$key"
+      fi
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded
@@ -2707,7 +2712,7 @@ EOF
                 # keep deferring to a pause the crew has since moved past).
                 working) if [ ! -e "$pf" ] && status_is_paused_or_captain_held "$last"; then
                            clear_pause_state "$key"
-                           clear_run_step_state "$key"
+                           handoff_run_step_to_wedge "$key"
                            printf '%s' "$h" > "$sf"
                            wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          else

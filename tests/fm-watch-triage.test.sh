@@ -3389,6 +3389,82 @@ test_paused_authoritative_working_escalates_on_stalled_run_step() {
   pass "a paused status overridden by authoritative working preserves its run-step position timer and escalates once it stops advancing"
 }
 
+# A declared pause that a run-step cadence has already overridden can still be
+# holding a now-stale .paused-<key> flag when a later poll re-reads the SAME
+# pane hash: pause_state_class sees the status log still reading paused: while
+# firstmate's own live re-verification reports working/run-step, so the key
+# falls back from the run-step cadence to the ordinary wedge timer. Since the
+# pane itself made no progress (same hash), the run-step cadence's escalation
+# history must carry into the wedge timer rather than being discarded.
+test_paused_working_handoff_carries_history_on_unchanged_hash() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case paused-working-handoff-unchanged-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-handoff"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-handoff.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/paused-handoff.status"
+  sig=$(seen_sig "$state/paused-handoff.status"); printf '%s' "$sig" > "$state/.seen-paused-handoff_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '2\n' > "$state/.runstep-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher did not complete a poll cycle: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 2 ] \
+    || fail "the run-step escalation history did not carry into the wedge timer on an unchanged pane hash: $(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo missing)"
+  [ ! -e "$state/.runstep-escalations-$key" ] || fail "the run-step escalation file survived its handoff to the wedge timer"
+  pass "a declared pause overridden by a stale, authoritative run-step verdict carries its escalation history into the wedge timer when the pane hash is unchanged"
+}
+
+# Counterpart: the SAME declared-pause-vs-working reconciliation, but the pane
+# hash HAS changed since the last classified stale hash. The crew made real
+# progress, so the episode is over and both escalation counters (the run-step
+# history being handed off, and whatever the ordinary wedge timer had already
+# counted) must reset, exactly as the pure wedge path does on progress.
+test_paused_working_resets_history_on_changed_hash() {
+  local dir state fakebin out capture_file window key old_hash new_hash sig pid
+  dir=$(make_case paused-working-resets-changed-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-reset"
+  printf 'idle awaiting external, continued\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-reset.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/paused-reset.status"
+  sig=$(seen_sig "$state/paused-reset.status"); printf '%s' "$sig" > "$state/.seen-paused-reset_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  old_hash=$(hash_text "idle awaiting external")
+  new_hash=$(hash_text "idle awaiting external, continued")
+  printf '%s' "$new_hash" > "$state/.hash-$key"
+  printf '%s' "$old_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.runstep-$key"
+  printf '2\n' > "$state/.runstep-escalations-$key"
+  printf '5\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher did not complete a poll cycle: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+
+  [ ! -e "$state/.runstep-escalations-$key" ] \
+    || fail "the run-step escalation count survived a changed pane hash: $(cat "$state/.runstep-escalations-$key")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the pre-existing wedge escalation count survived a changed pane hash: $(cat "$state/.wedge-escalations-$key")"
+  pass "a declared pause overridden by a stale, authoritative run-step verdict resets both escalation counters when the pane hash has changed"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -5368,6 +5444,8 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_paused_authoritative_working_escalates_on_stalled_run_step
+test_paused_working_handoff_carries_history_on_unchanged_hash
+test_paused_working_resets_history_on_changed_hash
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
