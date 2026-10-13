@@ -6,6 +6,7 @@ def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
 def valid_record:
   try (.schema == "fm-contributions.v1" and (.task | type == "string")
   and (.records | type == "array")
+  and ((.retired // []) | type == "array" and all(.[]; canonical_url))
   and all(.records[]; (.url | canonical_url) and (.kind == "pr" or .kind == "issue")
     and (.pending | type == "array") and (.seen | type == "array")
     and all(.pending[]; (.token | type == "string" and length > 0))
@@ -30,7 +31,9 @@ def known($input; $saved):
    + [($input.backlog.records // [])[] | select(.structured == true) as $task
       | ($task.links // [])[] | select(canonical_url) | {task:$task.id,url:.}]
    + [$saved[] | .task as $task | .records[] | {task:$task,url}])
-  | unique_by([.task,.url]);
+  | unique_by([.task,.url])
+  | [.[] | select(. as $candidate
+      | any($saved[]; .task == $candidate.task and ((.retired // []) | index($candidate.url) != null)) | not)];
 def latest_checks:
   group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
 def projected($input; $saved; $now; $max_age):
