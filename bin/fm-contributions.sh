@@ -12,15 +12,17 @@
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
 # Every URL explicitly linked by a structured backlog row or a task's pr= is
-# owned. Previously observed URLs remain in data/<task>/contributions.json after
-# endpoint teardown. Repository-wide PR discovery never establishes ownership.
+# owned. Open URLs remain in data/<task>/contributions.json after endpoint
+# teardown, while terminal observations retire after their pending signals clear.
+# Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
-# task and records[]. Each record contains url, kind, checked_at, error,
+# task, records[], and retired terminal URLs. Each record contains url, kind, checked_at, error,
 # observation, verdict, seen event tokens, pending events, and notified tokens.
 # observation is one coherent forge read (a PR head is rechecked after fetching
-# checks/reviews). Checks are normalized by name, id, started_at, status and
+# checks/reviews). Terminal records retire after their pending signals are
+# acknowledged. Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
 # observation's lane names also disclose a lane absent from the next head.
 # A verdict records the EXACT judged head, source URL, actor and summary. A
@@ -169,6 +171,22 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+retire_terminal() { # task canonical-url record-json-file
+  local task=$1 url=$2 record=$3 file dir device staged
+  jq -e '(.observation.state | IN("merged", "closed")) and (.pending | length == 0)' "$record" >/dev/null || return 0
+  fm_pr_task_id_valid "$task" || fail 'invalid contribution task'
+  dir="$DATA/$task"
+  file="$dir/contributions.json"
+  [ ! -L "$dir" ] && [ -f "$file" ] || fail 'unsafe contribution record destination'
+  device=$(fm_pr_file_device "$dir")
+  fm_pr_regular_destination_on_device_or_absent "$file" "$device" || fail 'unsafe contribution record destination'
+  staged=$(umask 077; mktemp "$dir/.contributions.XXXXXX")
+  jq --arg url "$url" '.records |= map(select(.url != $url)) | .retired = ((.retired // []) + [$url] | unique)' "$file" > "$staged"
+  chmod 600 "$staged"
+  fm_pr_regular_destination_on_device_or_absent "$file" "$device" || fail 'contribution destination changed'
+  mv -f -- "$staged" "$file"
+}
+
 forge() {
   local remaining bounded=0 rc=0
   remaining=$((DEADLINE - $(date +%s)))
@@ -276,6 +294,7 @@ poll() {
     | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   BUDGET_EXHAUSTED=0
+  : > "$TMP/failures.jsonl"
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 2 ] || continue
     [ "$(date +%s)" -lt "$DEADLINE" ] || break
@@ -285,7 +304,10 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
-    [ "$observed" -eq 0 ] || printf 'contributions: observation unavailable for %s\n' "$url"
+    if [ "$observed" -ne 0 ]; then
+      error='forge observation unavailable or changed during read'
+      jq -n --arg url "$url" --arg error "$error" '{url:$url,error:$error}' >> "$TMP/failures.jsonl"
+    fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
@@ -304,13 +326,21 @@ poll() {
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
-        error='forge observation unavailable or changed during read'
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
+      retire_terminal "$task" "$url" "$TMP/row.json"
     done
   done < "$TMP/known.tsv"
+  while IFS=$'\t' read -r count error url; do
+    [ "$count" -gt 0 ] || continue
+    if [ "$count" -eq 1 ]; then
+      printf 'contributions: observation unavailable for %s\n' "$url"
+    else
+      printf 'contributions: observation unavailable for %s contribution(s): %s\n' "$count" "$error"
+    fi
+  done < <(jq -sr 'sort_by(.error) | group_by(.error)[] | [length, .[0].error, .[0].url] | @tsv' "$TMP/failures.jsonl")
 }
 
 arm() {
@@ -371,6 +401,7 @@ case "${1:-}" in
         '.verdict={head:$head,source:$source,actor:$actor,summary:$summary}' "$TMP/row.json" > "$TMP/update.json"
     fi
     write_record "$task" "$TMP/update.json"
+    [ "$action" != ack ] || retire_terminal "$task" "$url" "$TMP/update.json"
     ;;
   *) usage >&2; exit 2 ;;
 esac
