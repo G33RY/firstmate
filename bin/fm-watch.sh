@@ -394,7 +394,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .runstep-*, .writing-*, .waiting-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -688,7 +688,8 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" \
+      "$STATE/.runstep-escalations-$key"; then
       for created in "${created_keys[@]}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1194,7 +1195,7 @@ handle_run_step_stale() {  # <window> <task> <hash> [predetail]
     # No longer confirmable as an active run step: drop this cadence and let
     # the ordinary wedge timer judge it fresh from now, rather than from
     # whenever this cadence first admitted the pane.
-    rm -f "$rf" "$sigf" "$sincef" "$recheckf" "$resf" "$ewf"
+    handoff_run_step_to_wedge "$key"
     date +%s > "$STATE/.stale-since-$key"
     clear_write_tracking "$key"
     triage_log "run-step no longer confirmable, reverting to ordinary wedge timer: $win"
@@ -1296,6 +1297,20 @@ clear_run_step_state() {  # <window-key>
     "$STATE/.runstep-rechecked-$key" "$STATE/.runstep-resurfaced-$key" "$STATE/.runstep-escalations-$key"
 }
 
+handoff_run_step_to_wedge() {  # <window-key>
+  local key=$1 run_step_file wedge_file run_step_count wedge_count
+  run_step_file="$STATE/.runstep-escalations-$key"
+  wedge_file="$STATE/.wedge-escalations-$key"
+  run_step_count=$(cat "$run_step_file" 2>/dev/null || echo 0)
+  wedge_count=$(cat "$wedge_file" 2>/dev/null || echo 0)
+  case "$run_step_count" in ''|*[!0-9]*) run_step_count=0 ;; esac
+  case "$wedge_count" in ''|*[!0-9]*) wedge_count=0 ;; esac
+  if [ "$run_step_count" -gt "$wedge_count" ]; then
+    printf '%s\n' "$run_step_count" > "$wedge_file"
+  fi
+  clear_run_step_state "$key"
+}
+
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
 # timer and escalation count, and both deferral chains the timer can take - the
 # write-deferral chain and the wait-deferral throttle. Split out so a caller
@@ -1305,7 +1320,7 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-    "$STATE/.waiting-resurfaced-$key"
+    "$STATE/.runstep-escalations-$key" "$STATE/.waiting-resurfaced-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
@@ -2608,7 +2623,12 @@ EOF
               wake "stale: $w"
             fi
           elif [ -e "$rwf" ]; then
-            handle_run_step_stale "$w" "$task" "$h"
+            if [ -e "$ssf" ] && ! status_is_paused_or_captain_held "$last"; then
+              handoff_run_step_to_wedge "$key"
+              wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            else
+              handle_run_step_stale "$w" "$task" "$h"
+            fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -2660,7 +2680,12 @@ EOF
                 ;;
             esac
           elif [ -e "$rwf" ]; then
-            handle_run_step_stale "$w" "$task" "$h"
+            if [ -e "$ssf" ] && ! status_is_paused_or_captain_held "$last"; then
+              handoff_run_step_to_wedge "$key"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+            else
+              handle_run_step_stale "$w" "$task" "$h"
+            fi
           else
             task=$(window_to_task "$w" "$STATE")
             last=$(last_status_line "$STATE/$task.status")

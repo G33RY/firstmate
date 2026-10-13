@@ -886,6 +886,7 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s' "$(hash_text 'idle output from the prior interval')" > "$state/.hash-$key"
   printf '2\n' > "$state/.wedge-escalations-$key"
+  printf '2\n' > "$state/.runstep-escalations-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$capture_count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=1 \
@@ -897,6 +898,8 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
     || { reap "$pid"; fail "a churning turn-end was not absorbed before the stale-path capture failed: $(cat "$out")"; }
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || { reap "$pid"; fail "churn retained the prior quiet interval's wedge-escalation count"; }
+  [ ! -e "$state/.runstep-escalations-$key" ] \
+    || { reap "$pid"; fail "churn retained the prior quiet interval's run-step escalation count"; }
   [ ! -s "$state/.wake-queue" ] \
     || { reap "$pid"; fail "the absorbed churn fixture queued an unexpected wake"; }
   reap "$pid"
@@ -3317,6 +3320,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
     && fail "a still-declared wait was reported as a possible wedge: $(cat "$out")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "a still-declared wait counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+  printf '2\n' > "$state/.runstep-escalations-$key"
 
   # Lifting the declaration restores the unchanged escalation, which is what
   # keeps the deferral above from being indistinguishable from no detection.
@@ -3332,6 +3336,9 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   wait_for_exit "$pid" 100 || fail "authoritative working state did not wedge-escalate past the threshold once the declaration was lifted"
   grep -F "possible wedge" "$out" >/dev/null || fail "authoritative working wedge escalation omitted its reason"
   grep -F "demand-deep-inspection" "$out" >/dev/null || fail "authoritative working wedge escalation did not demand deep inspection at the threshold"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] \
+    || fail "ordinary wedge escalation did not inherit the run-step escalation history"
+  [ ! -e "$state/.runstep-escalations-$key" ] || fail "run-step escalation history remained after the wedge handoff"
   unset FM_FAKE_CREW_STATE
   pass "a paused status overridden by authoritative working preserves its wedge timer, is rechecked rather than wedge-escalated while the declaration stands, and escalates once it is lifted"
 }
