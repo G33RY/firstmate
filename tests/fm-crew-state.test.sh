@@ -688,6 +688,25 @@ test_daemon_claim_over_live_run_reads_run_alive() {
   pass "daemon/timeout blocked claim over a live fixing run reads as run alive"
 }
 
+test_recent_pipeline_activity_is_exposed_to_the_watcher() {
+  reset_fakes
+  local d out
+  d=$(new_case recent-pipeline-activity)
+  make_repo_on_branch "$d/wt" fm/feat-ra
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ra.meta" "window=fm:fm-feat-ra" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\n' > "$d/state/feat-ra.status"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "pipeline activity recent" "fresh pipeline output is exposed"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_not_contains "$out" "pipeline activity recent" "quiet pipeline output is not fresh"
+  pass "recent pipeline activity is exposed only while the client reports it fresh"
+}
+
 # A genuine refused socket outranks the persisted fixing record, which can
 # survive after the daemon exits.
 test_socket_refusal_over_stale_fixing_run_reports_blocked() {
@@ -2958,6 +2977,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
+test_recent_pipeline_activity_is_exposed_to_the_watcher
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
 test_socket_refusal_override_expires_when_the_crew_moves_on

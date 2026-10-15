@@ -837,6 +837,10 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  if [ "$RUN_STATE" = working ] && nm_run_activity_is_recent; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}pipeline activity recent"
+  fi
+
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"

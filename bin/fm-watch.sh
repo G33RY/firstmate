@@ -1167,9 +1167,15 @@ handle_paused_stale() {  # <window> <task> <hash>
 # consecutive ticks means the step is not merely quiet but not moving, and
 # escalates as a real wedge exactly like the ordinary timer's own
 # demand-deep-inspection ladder - "the step is quiet" and "the step is not
-# moving" stay distinguishable. A pane whose only 'working' evidence is a busy
-# PANE, not a run step, falls back to the ordinary wedge timer here (matching
-# its pre-existing short-timer behavior) rather than ever reaching this cadence.
+# moving" stay distinguishable. The one exception is a detail carrying
+# crew_run_step_detail's own "pipeline activity recent" marker (the client's
+# positive recency verdict, not a second threshold invented here): that
+# always resets the signature and escalation count instead of comparing it,
+# because fresh pipeline output is proof of progress no matter how many
+# consecutive ticks report it, so this cadence never climbs the ladder while
+# that marker holds. A pane whose only 'working' evidence is a busy PANE, not
+# a run step, falls back to the ordinary wedge timer here (matching its
+# pre-existing short-timer behavior) rather than ever reaching this cadence.
 handle_run_step_stale() {  # <window> <task> <hash> [predetail]
   local win=$1 task=$2 h=$3 key rf sigf sincef recheckf resf ewf detail age n reason
   key=$(window_key "$win")
@@ -1203,6 +1209,13 @@ handle_run_step_stale() {  # <window> <task> <hash> [predetail]
   fi
   : > "$rf"
   date +%s > "$recheckf"
+  if [[ "$detail" = *"pipeline activity recent"* ]]; then
+    printf '%s' "$detail" > "$sigf"
+    date +%s > "$sincef"
+    rm -f "$resf" "$ewf"
+    triage_log "absorbed run-step stale (recent pipeline activity): $win"
+    return 0
+  fi
   if [ "$(cat "$sigf" 2>/dev/null || true)" != "$detail" ]; then
     printf '%s' "$detail" > "$sigf"
     date +%s > "$sincef"
