@@ -2050,6 +2050,53 @@ test_run_step_progress_resets_the_position_timer() {
   pass "a run step whose reported position keeps advancing resets its timer and never wedge-escalates"
 }
 
+test_recent_pipeline_activity_suppresses_wedge_until_quiet() {
+  local dir state fakebin out capture_file window key pane_hash pid
+  dir=$(make_case recent-pipeline-activity); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pipeline-activity"
+  printf 'idle test output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pipeline-activity.meta"
+  printf 'working: validating\n' > "$state/pipeline-activity.status"
+  printf '%s' "$(seen_sig "$state/pipeline-activity.status")" > "$state/.seen-pipeline-activity_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle test output')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.runstep-$key"
+  printf 'validating (fixing) · pipeline activity recent' > "$state/.runstep-sig-$key"
+  echo $(( $(date +%s) - 5000 )) > "$state/.runstep-since-$key"
+  echo 2 > "$state/.runstep-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · pipeline activity recent'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "recent pipeline activity wedge-escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "recent pipeline activity printed a stale wake"
+  [ ! -e "$state/.runstep-escalations-$key" ] || fail "recent pipeline activity retained an escalation count"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the active-pipeline watcher stop"
+
+  rm -f "$state/.runstep-rechecked-$key"
+  printf 'validating (fixing)' > "$state/.runstep-sig-$key"
+  echo $(( $(date +%s) - 5000 )) > "$state/.runstep-since-$key"
+  echo 2 > "$state/.runstep-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "quiet pipeline activity did not wedge-escalate"
+  grep -F 'possible wedge' "$out" >/dev/null || fail "quiet pipeline activity did not report a wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "recent pipeline activity suppresses wedge escalation, while quiet activity still escalates"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -5411,6 +5458,7 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_run_step_progress_resets_the_position_timer
+test_recent_pipeline_activity_suppresses_wedge_until_quiet
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

@@ -1203,6 +1203,13 @@ handle_run_step_stale() {  # <window> <task> <hash> [predetail]
   fi
   : > "$rf"
   date +%s > "$recheckf"
+  if [[ "$detail" = *"pipeline activity recent"* ]]; then
+    printf '%s' "$detail" > "$sigf"
+    date +%s > "$sincef"
+    rm -f "$resf" "$ewf"
+    triage_log "absorbed run-step stale (recent pipeline activity): $win"
+    return 0
+  fi
   if [ "$(cat "$sigf" 2>/dev/null || true)" != "$detail" ]; then
     printf '%s' "$detail" > "$sigf"
     date +%s > "$sincef"
