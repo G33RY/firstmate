@@ -145,6 +145,9 @@ printf '%s\n' "\$OUT" | grep -F 'could not be revived'
 # shellcheck disable=SC1091
 . $(shell_quote "$SCRIPT_DIR/fm-babysitter-invoke-lib.sh")
 fm_babysitter_invoke_check >/dev/null 2>&1
+# shellcheck disable=SC1091
+. $(shell_quote "$SCRIPT_DIR/fm-babysitter-context-lib.sh")
+fm_babysitter_context_check >/dev/null 2>&1
 exit 0
 CHECKSH
     if ! chmod 700 "$CHECK_TMP" || ! mv -f "$CHECK_TMP" "$CHECK"; then

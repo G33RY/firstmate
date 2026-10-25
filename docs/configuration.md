@@ -218,7 +218,7 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
-## Babysitter (config/babysitter-enabled, config/babysitter-ntfy-topic)
+## Babysitter (config/babysitter-enabled, config/babysitter-ntfy-topic, config/babysitter-context-threshold-percent)
 
 `config/babysitter-enabled` is local, gitignored, and content-ignored (only its presence matters).
 It is the one-time opt-in for the whole judge-liveness/relaunch layer (`bin/fm-babysitter-liveness-lib.sh`): absent, session start and the watcher's mid-session check never spawn, probe, or relaunch anything - a true no-op, so no other home or test environment is affected by this feature existing.
@@ -232,6 +232,7 @@ It gates the babysitter's tier-2 escalation (`bin/fm-babysitter-ntfy.sh`): prese
 `FM_BABYSITTER_LIVENESS_MAX_ATTEMPTS` (default `3`) bounds consecutive failed judge relaunch attempts before it is reported irrevivable.
 `FM_BABYSITTER_SWEEP_INTERVAL_SECS` (default `1800`) bounds how long a judge pass may go undispatched with no new ledger content before the deterministic cadence check (`bin/fm-babysitter-invoke-lib.sh`) fires one anyway, so a stall with no new dialog still gets a sweep.
 `FM_BABYSITTER_INVOKE_STUCK_SECS` (default `600`) is how long an unacknowledged pass-dispatch record may sit in the judge's steering inbox before the cadence check treats it as orphaned rather than in flight.
+`config/babysitter-context-threshold-percent` (optional, local, gitignored, one integer from 1 through 100) overrides the default 40 percent context-size threshold; the measurement basis and the worker and primary relaunch rules are owned by [`babysitter.md`](babysitter.md).
 See [`babysitter.md`](babysitter.md) for the full contract, including exactly what survives a session end, a context clear, a reboot, or a terminal-server death.
 
 ## Gate defaults (.no-mistakes.yaml)
