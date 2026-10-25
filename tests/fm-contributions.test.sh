@@ -124,7 +124,9 @@ case "$*" in
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8')
-    jq -n --arg head "$(cat "$FORGE/head")" '{state:"open",user:{login:"author"},head:{sha:$head},draft:false,mergeable:true,merged_at:null}' ;;
+    jq -n --arg head "$(cat "$FORGE/head")" --arg terminal "$(cat "$FORGE/terminal" 2>/dev/null || true)" '
+      {state:(if $terminal == "" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
+       mergeable:true,merged_at:(if $terminal == "merged" then "2026-09-16T08:00:00Z" else null end)}' ;;
   'api repos/o/r/issues/9')
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
   'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
@@ -560,6 +562,7 @@ case "$fault:$*" in
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  fail-all:'api repos/o/r/pulls/'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
@@ -613,6 +616,50 @@ test_genuine_failure_near_deadline_is_unavailable() {
   pass 'a genuine forge failure inside the budget still records the error and wakes'
 }
 
+test_terminal_contribution_retires_after_observation() {
+  local home calls
+  home=$(new_home terminal-retirement)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'merged\n' > "$home/forge/terminal"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'terminal contribution poll failed'
+  jq -e '.records | length == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'observed terminal contribution record was not retired'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'repeat terminal contribution poll failed'
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 1 ] || fail "retired terminal contribution was observed $calls times"
+  pass 'an observed terminal contribution retires and is not polled again'
+}
+
+test_open_contribution_stays_observed() {
+  local home calls
+  home=$(new_home open-retention)
+  forge_home "$home"
+  wrap_forge "$home"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'first open contribution poll failed'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'second open contribution poll failed'
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "open contribution was observed $calls times"
+  jq -e '(.records | length) == 1 and .records[0].observation.state == "open"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'open contribution record was retired'
+  pass 'an open contribution remains under observation'
+}
+
+test_shared_observation_failure_is_summarized() {
+  local home out lines
+  home=$(new_home summarized-failure)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  printf 'fail-all\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'shared forge failure poll failed'
+  [ "$out" = 'contributions: observation unavailable for 2 contribution(s): forge observation unavailable or changed during read' ] \
+    || fail "shared forge failures were not summarized: $out"
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" = 1 ] || fail "shared forge failure emitted $lines wake lines"
+  pass 'same-error contribution failures are summarized into one wake'
+}
+
 test_shared_url_observed_once() {
   local mode home out calls expected
   for mode in ok fail head; do
@@ -641,7 +688,7 @@ test_shared_url_observed_once() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_terminal_contribution_retires_after_observation test_open_contribution_stays_observed test_shared_observation_failure_is_summarized test_shared_url_observed_once; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

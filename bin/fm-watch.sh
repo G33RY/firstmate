@@ -394,7 +394,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .runstep-*, .writing-*, .waiting-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -688,7 +688,8 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" \
+      "$STATE/.runstep-escalations-$key"; then
       for created in "${created_keys[@]}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1166,9 +1167,15 @@ handle_paused_stale() {  # <window> <task> <hash>
 # consecutive ticks means the step is not merely quiet but not moving, and
 # escalates as a real wedge exactly like the ordinary timer's own
 # demand-deep-inspection ladder - "the step is quiet" and "the step is not
-# moving" stay distinguishable. A pane whose only 'working' evidence is a busy
-# PANE, not a run step, falls back to the ordinary wedge timer here (matching
-# its pre-existing short-timer behavior) rather than ever reaching this cadence.
+# moving" stay distinguishable. The one exception is a detail carrying
+# crew_run_step_detail's own "pipeline activity recent" marker (the client's
+# positive recency verdict, not a second threshold invented here): that
+# always resets the signature and escalation count instead of comparing it,
+# because fresh pipeline output is proof of progress no matter how many
+# consecutive ticks report it, so this cadence never climbs the ladder while
+# that marker holds. A pane whose only 'working' evidence is a busy PANE, not
+# a run step, falls back to the ordinary wedge timer here (matching its
+# pre-existing short-timer behavior) rather than ever reaching this cadence.
 handle_run_step_stale() {  # <window> <task> <hash> [predetail]
   local win=$1 task=$2 h=$3 key rf sigf sincef recheckf resf ewf detail age n reason
   key=$(window_key "$win")
@@ -1194,7 +1201,7 @@ handle_run_step_stale() {  # <window> <task> <hash> [predetail]
     # No longer confirmable as an active run step: drop this cadence and let
     # the ordinary wedge timer judge it fresh from now, rather than from
     # whenever this cadence first admitted the pane.
-    rm -f "$rf" "$sigf" "$sincef" "$recheckf" "$resf" "$ewf"
+    handoff_run_step_to_wedge "$key"
     date +%s > "$STATE/.stale-since-$key"
     clear_write_tracking "$key"
     triage_log "run-step no longer confirmable, reverting to ordinary wedge timer: $win"
@@ -1202,6 +1209,13 @@ handle_run_step_stale() {  # <window> <task> <hash> [predetail]
   fi
   : > "$rf"
   date +%s > "$recheckf"
+  if [[ "$detail" = *"pipeline activity recent"* ]]; then
+    printf '%s' "$detail" > "$sigf"
+    date +%s > "$sincef"
+    rm -f "$resf" "$ewf"
+    triage_log "absorbed run-step stale (recent pipeline activity): $win"
+    return 0
+  fi
   if [ "$(cat "$sigf" 2>/dev/null || true)" != "$detail" ]; then
     printf '%s' "$detail" > "$sigf"
     date +%s > "$sincef"
@@ -1296,6 +1310,20 @@ clear_run_step_state() {  # <window-key>
     "$STATE/.runstep-rechecked-$key" "$STATE/.runstep-resurfaced-$key" "$STATE/.runstep-escalations-$key"
 }
 
+handoff_run_step_to_wedge() {  # <window-key>
+  local key=$1 run_step_file wedge_file run_step_count wedge_count
+  run_step_file="$STATE/.runstep-escalations-$key"
+  wedge_file="$STATE/.wedge-escalations-$key"
+  run_step_count=$(cat "$run_step_file" 2>/dev/null || echo 0)
+  wedge_count=$(cat "$wedge_file" 2>/dev/null || echo 0)
+  case "$run_step_count" in ''|*[!0-9]*) run_step_count=0 ;; esac
+  case "$wedge_count" in ''|*[!0-9]*) wedge_count=0 ;; esac
+  if [ "$run_step_count" -gt "$wedge_count" ]; then
+    printf '%s\n' "$run_step_count" > "$wedge_file"
+  fi
+  clear_run_step_state "$key"
+}
+
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
 # timer and escalation count, and both deferral chains the timer can take - the
 # write-deferral chain and the wait-deferral throttle. Split out so a caller
@@ -1305,7 +1333,7 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-    "$STATE/.waiting-resurfaced-$key"
+    "$STATE/.runstep-escalations-$key" "$STATE/.waiting-resurfaced-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
@@ -2501,7 +2529,12 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      if [ -e "$STATE/.runstep-$key" ]; then
+        clear_pause_state "$key"
+        handoff_run_step_to_wedge "$key"
+      else
+        clear_pause_tracking "$key"
+      fi
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded
@@ -2608,7 +2641,12 @@ EOF
               wake "stale: $w"
             fi
           elif [ -e "$rwf" ]; then
-            handle_run_step_stale "$w" "$task" "$h"
+            if [ -e "$ssf" ] && ! status_is_paused_or_captain_held "$last"; then
+              handoff_run_step_to_wedge "$key"
+              wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            else
+              handle_run_step_stale "$w" "$task" "$h"
+            fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -2660,7 +2698,12 @@ EOF
                 ;;
             esac
           elif [ -e "$rwf" ]; then
-            handle_run_step_stale "$w" "$task" "$h"
+            if [ -e "$ssf" ] && ! status_is_paused_or_captain_held "$last"; then
+              handoff_run_step_to_wedge "$key"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+            else
+              handle_run_step_stale "$w" "$task" "$h"
+            fi
           else
             task=$(window_to_task "$w" "$STATE")
             last=$(last_status_line "$STATE/$task.status")
@@ -2682,7 +2725,7 @@ EOF
                 # keep deferring to a pause the crew has since moved past).
                 working) if [ ! -e "$pf" ] && status_is_paused_or_captain_held "$last"; then
                            clear_pause_state "$key"
-                           clear_run_step_state "$key"
+                           handoff_run_step_to_wedge "$key"
                            printf '%s' "$h" > "$sf"
                            wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          else
